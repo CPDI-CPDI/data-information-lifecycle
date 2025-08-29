@@ -4,5 +4,5 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // keep your existing "base" if you’re deploying to GH Pages
+  base: process.env.VITE_BASE ?? '/', // needed for GitHub Pages
 })
