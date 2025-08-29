@@ -67,10 +67,6 @@ async function fetchCsv<T extends Record<string, any> = Record<string, any>>(url
   );
 }
 
-function byNameId(map: Record<string, NodeRow>, id: string | undefined) {
-  return id ? map[id] : undefined;
-}
-
 function makeColorForFamily(family: string): { border: string; background: string; highlight: { border: string; background: string } } {
   // deterministic pastel-ish palette per family using a hash
   let h = 0;
@@ -141,7 +137,6 @@ function buildVisDatasets(
 
 // Dim/un-dim helpers
 function applyDimStyles(
-  network: Network,
   visNodes: DataSet<VisNode>,
   visEdges: DataSet<VisEdge>,
   keepNodeIds: Set<string>,
@@ -165,23 +160,13 @@ function applyDimStyles(
   visEdges.update(updatesE);
 }
 
-function clearDimStyles(network: Network, visNodes: DataSet<VisNode>, visEdges: DataSet<VisEdge>) {
+function clearDimStyles(visNodes: DataSet<VisNode>, visEdges: DataSet<VisEdge>) {
   const nodes = visNodes.get();
   const edges = visEdges.get();
   const updatesN = nodes.map((n) => ({ id: String(n.id), opacity: 1.0, font: { color: "#111827" } as any }));
   const updatesE = edges.map((e) => ({ id: String(e.id), color: (e as any).color }));
   visNodes.update(updatesN);
   visEdges.update(updatesE);
-}
-
-// Compute outgoing adjacency from full edges list
-function buildAdjacency(edges: EdgeRow[]): Map<string, string[]> {
-  const g = new Map<string, string[]>();
-  for (const e of edges) {
-    if (!g.has(e.source)) g.set(e.source, []);
-    g.get(e.source)!.push(e.target);
-  }
-  return g;
 }
 
 function bfsReachable(start: string, edgesSet: Set<string> /* key: src->tgt */): Set<string> {
@@ -309,7 +294,7 @@ export default function App() {
     setSelectedGroup("");
     setLegendActive(new Set(groups));
     if (networkRef.current && visNodesRef.current && visEdgesRef.current) {
-      clearDimStyles(networkRef.current, visNodesRef.current, visEdgesRef.current);
+      clearDimStyles(visNodesRef.current, visEdgesRef.current);
     }
   }
 
@@ -340,7 +325,7 @@ export default function App() {
         keepNodes.add(to);
       }
     }
-    applyDimStyles(networkRef.current, visNodes, visEdges, keepNodes, keepEdges);
+    applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
   }
 
   function applySelectByGroup(group: string) {
@@ -366,7 +351,7 @@ export default function App() {
         keepNodes.add(to);
       }
     }
-    applyDimStyles(networkRef.current, visNodes, visEdges, keepNodes, keepEdges);
+    applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
   }
 
   function toggleLegendFamily(fam: string) {
@@ -401,7 +386,7 @@ export default function App() {
       if (keepNodes.has(from)) keepEdges.add(String(e.id));
       if (keepNodes.has(to)) keepNodes.add(to);
     }
-    applyDimStyles(networkRef.current, visNodes, visEdges, keepNodes, keepEdges);
+    applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
   }
 
   // -----------------------------
@@ -438,7 +423,6 @@ export default function App() {
     if (!reachable.has(disposeId)) errors.push("'Dispose' must be reachable from 'Specify needs'.");
 
     // Terminal nodes must be {Dispose, Share}
-    const activeTargets = new Set(Array.from(activeEdgeKeys).map((k) => k.split("->")[1]));
     const activeSources = new Set(Array.from(activeEdgeKeys).map((k) => k.split("->")[0]));
     const terminals = Array.from(reachable).filter((n) => !activeSources.has(n)); // no outgoing active edge
     for (const t of terminals) {
