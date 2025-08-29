@@ -11,7 +11,8 @@
     "jsx": "react-jsx",
     "verbatimModuleSyntax": true,
     "noUnusedLocals": true,
-    "typeRoots": ["./node_modules/@types", "./src/types"]
+    "typeRoots": ["./node_modules/@types", "./src/types"],
+    "allowImportingTsExtensions": true
   },
   "include": ["src"]
 }
