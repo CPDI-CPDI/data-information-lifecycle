@@ -72,3 +72,34 @@ button:focus-visible {
     background-color: #f9f9f9;
   }
 }
+.btn-main {
+  @apply rounded-md px-3 py-1.5 bg-black text-white hover:bg-neutral-900
+         focus:outline-none focus:ring-2 focus:ring-black;
+  /* force text color in case something downstream overrides */
+  color: #fff !important;
+  background-color: #000 !important;
+}
+
+/* Small icon buttons (zoom/pan controls, legend pills active state, etc.) */
+.btn-icon {
+  @apply h-7 w-7 flex items-center justify-center rounded border text-xs
+         bg-black text-white hover:bg-neutral-900
+         focus:outline-none focus:ring-2 focus:ring-black;
+  color: #fff !important;
+  background-color: #000 !important;
+}
+
+/* Legend chip when active */
+.legend-chip-active {
+  @apply px-2 py-1 rounded-full border text-sm bg-black text-white border-black
+         focus:outline-none focus:ring-2 focus:ring-black;
+  color: #fff !important;
+  background-color: #000 !important;
+}
+
+/* Legend chip when inactive */
+.legend-chip-inactive {
+  @apply px-2 py-1 rounded-full border text-sm bg-gray-100 text-gray-700 border-gray-300
+         hover:bg-gray-200
+         focus:outline-none focus:ring-2 focus:ring-black;
+}

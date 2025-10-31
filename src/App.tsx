@@ -8,17 +8,10 @@ import type { Node as VisNode, Edge as VisEdge } from "vis-network";
 import { Network } from "vis-network";
 import { DataSet } from "vis-data";
 
-// REMOVE this line if you still have it in App.tsx (belongs in vite.config.ts only)
-// import tailwindcss from "@tailwindcss/vite";
-
 /**
  * Quick start notes (run these in your Codespace terminal):
  *
- *   npm install papaparse vis-network xlsx tailwindcss @tailwindcss/vite
- *
- * Tailwind v4: ensure vite.config.ts includes the plugin:
- *   import tailwindcss from '@tailwindcss/vite'
- *   export default defineConfig({ plugins: [react(), tailwindcss()], base })
+ *   npm install papaparse vis-network xlsx
  *
  * Place CSVs in /public: nodes_final.csv, edges_final.csv
  */
@@ -44,6 +37,155 @@ export type EdgeRow = {
   description?: string; // default "No description"
   [k: string]: any;
 };
+
+// =================== HEX LAYOUT CONFIG ===================
+const GAP_X = 180; // tweak freely
+const GAP_Y = 140; // tweak freely
+
+// Row counts for a 4-row hex tiling: 5, 4, 4, 4
+// Horizontal offsets per row to make a hex grid: 0, +0.5, 0, +0.5
+const HEX_ROWS = [
+  { count: 5, offsetCols: 0 },
+  { count: 4, offsetCols: 0 },
+  { count: 4, offsetCols: 0.5 },
+  { count: 4, offsetCols: 0 },
+];
+
+// Anchor names (case-insensitive) and which slot they take in the grid.
+// Slots are defined row-by-row (r,c) with the offsets above.
+// Using the diagram you gave: 5 on the top row, then 4, 4, 4.
+const ANCHORS: Record<string, { r: number; c: number }> = {
+  "specify needs": { r: 0, c: 0 }, // #1
+  "discover":      { r: 0, c: 1 }, // #2
+  "acquire":       { r: 1, c: 0 }, // #3
+  "contextualize": { r: 2, c: 2 }, // #4 (third position in row 2)
+  "share":         { r: 2, c: 3 }, // #5 (fourth in row 2)
+  "preserve":      { r: 3, c: 2 }, // #6 (third in bottom row)
+  "dispose":       { r: 3, c: 3 }, // #7 (fourth in bottom row)
+};
+
+// Build all grid “slots” (x,y) for the 5-4-4-4 hex rows.
+function buildHexSlots(): Array<{ r: number; c: number; x: number; y: number }> {
+  const slots: Array<{ r: number; c: number; x: number; y: number }> = [];
+  for (let r = 0; r < HEX_ROWS.length; r++) {
+    const { count, offsetCols } = HEX_ROWS[r];
+    // center rows around 0; apply half-column offset for hex effect
+    const colStart = -((count - 1) / 2);
+    for (let c = 0; c < count; c++) {
+      const cx = (colStart + c + offsetCols) * GAP_X;
+      const cy = (r - (HEX_ROWS.length - 1) / 2) * GAP_Y;
+      slots.push({ r, c, x: cx, y: cy });
+    }
+  }
+  return slots;
+}
+
+// Assign fixed hex positions:
+// - place anchors first
+// - fill remaining slots with other nodes (stable order, loosely by Family then Name)
+function computeFixedHexPositions(nodes: NodeRow[]): Record<string, { x: number; y: number }> {
+  const slots = buildHexSlots();
+  const posBySlotKey = new Map<string, { x: number; y: number }>();
+  for (const s of slots) posBySlotKey.set(`${s.r}:${s.c}`, { x: s.x, y: s.y });
+
+  // map Name -> row slot (case-insensitive)
+  const nameToSlot = new Map<string, { r: number; c: number }>();
+  for (const [name, slot] of Object.entries(ANCHORS)) {
+    nameToSlot.set(name, slot);
+  }
+
+  // 1) put anchors
+  const usedSlots = new Set<string>();
+  const positions: Record<string, { x: number; y: number }> = {};
+  const byNameLower = Object.fromEntries(nodes.map(n => [n.Name.toLowerCase(), n]));
+
+  for (const [lowerName, slot] of nameToSlot) {
+    const n = byNameLower[lowerName];
+    if (!n) continue; // anchor node absent → skip gracefully
+    const key = `${slot.r}:${slot.c}`;
+    const p = posBySlotKey.get(key);
+    if (!p) continue;
+    positions[n.NameID] = { x: p.x, y: p.y };
+    usedSlots.add(key);
+  }
+
+  // 2) fill the remaining slots with remaining nodes (group by Family then Name)
+  const remainingNodes = nodes
+    .filter(n => positions[n.NameID] === undefined)
+    .sort((a, b) => {
+      const fa = a.Family || "", fb = b.Family || "";
+      if (fa !== fb) return fa.localeCompare(fb);
+      return (a.Name || "").localeCompare(b.Name || "");
+    });
+
+  for (const s of slots) {
+    const key = `${s.r}:${s.c}`;
+    if (usedSlots.has(key)) continue;
+    const n = remainingNodes.shift();
+    if (!n) break;
+    positions[n.NameID] = { x: s.x, y: s.y };
+  }
+
+  return positions;
+}
+
+// If an edge goes A→C and there is a node B exactly between them on the same row,
+// curve the edge slightly to avoid visually “piercing” B.
+function applyAntiPierce(
+  visEdges: DataSet<VisEdge>,
+  positions: Record<string, { x: number; y: number }>,
+  nodes: NodeRow[]
+) {
+  const byId = Object.fromEntries(nodes.map(n => [n.NameID, n]));
+  const all = visEdges.get();
+  const updates: Array<Partial<VisEdge> & { id: string | number }> = [];
+
+  // Build row membership by Y (within small epsilon)
+  const eps = 1e-3;
+  const yBuckets = new Map<number, string[]>(); // y -> NameIDs
+  for (const id of Object.keys(positions)) {
+    const y = positions[id].y;
+    // quantize Y to avoid float noise
+    const key = Math.round(y * 1000) / 1000;
+    if (!yBuckets.has(key)) yBuckets.set(key, []);
+    yBuckets.get(key)!.push(id);
+  }
+
+  // Helper: is idB between idA and idC on the same row?
+  function hasMiddleOnSameRow(idA: string, idC: string): boolean {
+    const pA = positions[idA], pC = positions[idC];
+    if (!pA || !pC) return false;
+    const yKey = Math.round(pA.y * 1000) / 1000;
+    if (Math.abs(pA.y - pC.y) > eps) return false; // not same row
+    const row = yBuckets.get(yKey) || [];
+    const [xmin, xmax] = pA.x < pC.x ? [pA.x, pC.x] : [pC.x, pA.x];
+    return row.some(mid => {
+      if (mid === idA || mid === idC) return false;
+      const x = positions[mid].x;
+      return x > xmin + eps && x < xmax - eps;
+    });
+  }
+
+  for (const e of all) {
+    const from = String(e.from);
+    const to   = String(e.to);
+    const pierces = hasMiddleOnSameRow(from, to);
+    if (pierces) {
+      updates.push({
+        id: e.id!,
+        smooth: { enabled: true, type: "curvedCW", roundness: 0.15 } as any
+      });
+    } else {
+      updates.push({
+        id: e.id!,
+        smooth: { enabled: false } as any
+      });
+    }
+  }
+
+  if (updates.length) visEdges.update(updates);
+}
+
 
 // -----------------------------
 // CSV helpers
@@ -86,55 +228,6 @@ function makeColorForFamily(family: string): { border: string; background: strin
 // -----------------------------
 type FilterMode = null | "id" | "group" | "legend";
 
-function buildVisDatasets(
-  nodes: NodeRow[],
-  edges: EdgeRow[],
-  options?: { showEdgeTooltips?: boolean; activeNodeIds?: Set<string> | null }
-) {
-  const nodeMapById: Record<string, NodeRow> = Object.fromEntries(nodes.map((n) => [n.NameID, n]));
-  const familyColors: Record<string, ReturnType<typeof makeColorForFamily>> = {};
-
-  const visNodes = new DataSet<VisNode>(
-    nodes.map((n) => {
-      if (!familyColors[n.Family]) familyColors[n.Family] = makeColorForFamily(n.Family);
-      const color = familyColors[n.Family];
-      const active = options?.activeNodeIds ? options.activeNodeIds.has(n.NameID) : true;
-      return {
-        id: n.NameID,
-        label: n.Name,
-        title: n.Definition || n.Name,
-        group: n.Family,
-        shape: "dot",
-        size: Math.min(40, Math.max(16, Number(n.size ?? 18))),
-        color: active
-          ? { border: color.border, background: color.background, highlight: color.highlight }
-          : { border: "#cccccc", background: "#e5e7eb", highlight: { border: "#a1a1aa", background: "#e5e7eb" } },
-        font: { color: active ? "#111827" : "#9ca3af", face: "ui-sans-serif, system-ui" },
-      } satisfies VisNode;
-    })
-  );
-
-  const edgeTooltips = !!options?.showEdgeTooltips;
-  const visEdges = new DataSet<VisEdge>(
-    edges.map((e) => {
-      const src = nodeMapById[e.source];
-      const color = src ? makeColorForFamily(src.Family) : { border: "#9ca3af", background: "#d1d5db", highlight: { border: "#6b7280", background: "#e5e7eb" } };
-      const smooth: any = { enabled: true, type: "dynamic" };
-      return {
-        id: e.id,
-        from: e.source,
-        to: e.target,
-        arrows: "to",
-        color: { color: color.border, highlight: color.highlight.border },
-        smooth,
-        title: edgeTooltips ? (e.description || "No description") : undefined,
-      } satisfies VisEdge;
-    })
-  );
-
-  return { visNodes, visEdges };
-}
-
 // Dim/un-dim helpers
 function applyDimStyles(
   visNodes: DataSet<VisNode>,
@@ -174,7 +267,6 @@ function bfsReachable(start: string, edgesSet: Set<string> /* key: src->tgt */):
   const seen = new Set<string>([start]);
   while (q.length) {
     const u = q.shift()!;
-    // scan edgesSet for outgoing from u
     for (const key of edgesSet) {
       const [s, t] = key.split("->");
       if (s === u && !seen.has(t)) {
@@ -184,6 +276,285 @@ function bfsReachable(start: string, edgesSet: Set<string> /* key: src->tgt */):
     }
   }
   return seen;
+}
+
+// Merge tooltips by undirected pair (A<->B shows both directions in one tooltip)
+function buildVisDatasets(
+  nodes: NodeRow[],
+  edges: EdgeRow[],
+  options: {
+    positions?: Record<string, { x: number; y: number }> | null;
+    showEdgeTooltips?: boolean;
+    activeNodeIds?: Set<string> | null;
+  } = {}
+) {
+  const nodeMapById: Record<string, NodeRow> = Object.fromEntries(nodes.map(n => [n.NameID, n]));
+
+  // family colors (stable + consistent)
+  const famColor = (family: string) => makeColorForFamily(family);
+  const famCache: Record<string, ReturnType<typeof makeColorForFamily>> = {};
+
+  const visNodes = new DataSet<VisNode>(
+    nodes.map((n) => {
+      if (!famCache[n.Family]) famCache[n.Family] = famColor(n.Family);
+      const c = famCache[n.Family];
+      const isActive = options.activeNodeIds ? options.activeNodeIds.has(n.NameID) : true;
+      const pos = options.positions?.[n.NameID];
+      const size = Math.min(24, Math.max(12, Number(n.size ?? 16)));
+
+      return {
+        id: n.NameID,
+        label: n.Name,
+        title: n.Definition || n.Name,
+        group: n.Family,
+        shape: "dot",
+        size,
+        ...(pos ? { x: pos.x, y: pos.y, fixed: { x: true, y: true } } : {}),
+        color: isActive
+          ? { border: c.border, background: c.background, highlight: c.highlight }
+          : { border: "#cccccc", background: "#e5e7eb", highlight: { border: "#a1a1aa", background: "#e5e7eb" } },
+        font: { color: isActive ? "#111827" : "#9ca3af", face: "ui-sans-serif, system-ui" }
+      } as VisNode;
+    })
+  );
+
+  // Merge tooltips for bi-directional pairs (one tooltip shows both directions)
+  const pairKey = (a: string, b: string) => (a < b ? `${a}__${b}` : `${b}__${a}`);
+  const tipLines = new Map<string, string[]>();
+  for (const e of edges) {
+    const s = nodeMapById[e.source]?.Name || e.source;
+    const t = nodeMapById[e.target]?.Name || e.target;
+    const d = (e.description || "No description").trim();
+    const pk = pairKey(e.source, e.target);
+    if (!tipLines.has(pk)) tipLines.set(pk, []);
+    tipLines.get(pk)!.push(`${s} → ${t}: ${d}`);
+  }
+
+  const visEdges = new DataSet<VisEdge>(
+    edges.map((e) => {
+      const src = nodeMapById[e.source];
+      const c = src ? makeColorForFamily(src.Family) : { border: "#1f2937", highlight: { border: "#1f2937", background: "#1f2937" } };
+      const pk = pairKey(e.source, e.target);
+      const title = options.showEdgeTooltips ? (tipLines.get(pk) || []).join("\n") : undefined;
+
+      return {
+        id: e.id,
+        from: e.source,
+        to: e.target,
+        arrows: "to",
+        smooth: { enabled: false } as any,
+        width: 1.5,
+        color: { color: c.border, highlight: c.highlight.border },
+        title
+      } as VisEdge;
+    })
+  );
+
+  return { visNodes, visEdges };
+}
+
+
+// -----------------------------
+// ALL-HEX GRID LAYOUT (odd-row staggering, uniform everywhere)
+// -----------------------------
+const HEX_Y = (x: number) => Math.round((Math.sqrt(3) / 2) * x); // ≈ 0.866 * x
+
+type Cell = { row: number; col: number };
+function hexPixel(row: number, col: number, xGap: number, yGap: number) {
+  const x = col * xGap + ((row % 2) ? xGap / 2 : 0); // odd rows shifted right
+  const y = row * yGap;
+  return { x, y };
+}
+
+function chooseGridDimsByAspect(n: number, containerW: number, containerH: number, xGap: number, yGap: number) {
+  // pick cols from width, rows from n
+  const targetCols = Math.max(6, Math.round(containerW / xGap));
+  let cols = Math.max(6, targetCols);
+  let rows = Math.max(5, Math.ceil(n / cols));
+  while (rows * cols < n) cols++;
+  return { rows, cols };
+}
+
+function computeHexPositionsGlobal(
+  nodes: NodeRow[],
+  containerW: number,
+  containerH: number,
+  xGap = 140
+): Record<string, { x: number; y: number }> {
+  const yGap = HEX_Y(xGap);
+  const n = nodes.length;
+  const { rows, cols } = chooseGridDimsByAspect(n, containerW, containerH, xGap, yGap);
+
+  const byName = (s: string) =>
+    nodes.find((n) => n.Name.toLowerCase() === s.toLowerCase())?.NameID || null;
+
+  const idSpecify = byName("Specify needs");
+  const idDiscover = byName("Discover");
+  const idAcquire = byName("Acquire");
+  const idContextualize = byName("Contextualize");
+  const idShare = byName("Share");
+  const idPreserve = byName("Preserve");
+  const idDispose = byName("Dispose");
+
+  // Build full availability list (row-major)
+  const avail: Cell[] = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) avail.push({ row: r, col: c });
+
+  // Fixed anchors (top-left cluster)
+  const TL_ANCHORS: Cell[] = [
+    { row: 0, col: 0 }, // Specify
+    { row: 0, col: 1 }, // Discover
+    { row: 1, col: 0 }, // Acquire
+  ];
+  // Bottom-right cluster
+  const BR_ANCHORS: Cell[] = [
+    { row: rows - 1, col: cols - 1 }, // Share
+    { row: rows - 1, col: Math.max(0, cols - 2) }, // Preserve
+    { row: Math.max(0, rows - 2), col: cols - 1 }, // Dispose
+  ];
+  // Center cell for Contextualize
+  const CTX_ANCHOR: Cell = { row: Math.floor(rows / 2), col: Math.floor(cols / 2) };
+
+  function placeFixed(ids: string[], cells: Cell[], availCells: Cell[]) {
+    const placements = new Map<string, Cell>();
+    for (let i = 0; i < ids.length && i < cells.length; i++) {
+      const want = cells[i];
+      const idx = availCells.findIndex((c) => c.row === want.row && c.col === want.col);
+      if (idx >= 0) {
+        const chosen = availCells.splice(idx, 1)[0];
+        placements.set(ids[i], chosen);
+      }
+    }
+    return placements;
+  }
+
+  const positions: Record<string, { x: number; y: number }> = {};
+  const anchored = new Set<string>();
+
+  // Place top-left anchors
+  const TLids = [idSpecify, idDiscover, idAcquire].filter(Boolean) as string[];
+  for (const [id, cell] of placeFixed(TLids, TL_ANCHORS, avail).entries()) {
+    const { x, y } = hexPixel(cell.row, cell.col, xGap, yGap);
+    positions[id] = { x, y };
+    anchored.add(id);
+  }
+
+  // Place bottom-right anchors
+  const BRids = [idShare, idPreserve, idDispose].filter(Boolean) as string[];
+  for (const [id, cell] of placeFixed(BRids, BR_ANCHORS, avail).entries()) {
+    const { x, y } = hexPixel(cell.row, cell.col, xGap, yGap);
+    positions[id] = { x, y };
+    anchored.add(id);
+  }
+
+  // Place Contextualize at center if present
+  if (idContextualize) {
+    const ctxPlaced = placeFixed([idContextualize], [CTX_ANCHOR], avail);
+    const cell = ctxPlaced.get(idContextualize);
+    if (cell) {
+      const { x, y } = hexPixel(cell.row, cell.col, xGap, yGap);
+      positions[idContextualize] = { x, y };
+      anchored.add(idContextualize);
+    }
+  }
+
+  // Remaining nodes: contiguous by Family (keeps families together)
+  const families = Array.from(new Set(nodes.map((n) => n.Family))).sort();
+  for (const fam of families) {
+    const famNodes = nodes.filter((n) => n.Family === fam && !anchored.has(n.NameID));
+    for (const node of famNodes) {
+      if (avail.length === 0) break;
+      const cell = avail.shift()!;
+      const { x, y } = hexPixel(cell.row, cell.col, xGap, yGap);
+      positions[node.NameID] = { x, y };
+      anchored.add(node.NameID);
+    }
+  }
+
+  // Safety: any leftovers (shouldn’t happen)
+  const leftovers = nodes.filter((n) => !anchored.has(n.NameID));
+  for (const nNode of leftovers) {
+    if (avail.length === 0) break;
+    const cell = avail.shift()!;
+    const { x, y } = hexPixel(cell.row, cell.col, xGap, yGap);
+    positions[nNode.NameID] = { x, y };
+  }
+
+  // Normalize to center the carpet in view (optional nicety)
+  const ids = Object.keys(positions);
+  if (ids.length) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const id of ids) {
+      const p = positions[id];
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    for (const id of ids) {
+      positions[id] = { x: positions[id].x - cx, y: positions[id].y - cy };
+    }
+  }
+
+  return positions;
+}
+
+// PUBLIC API — full graph (all-hex grid, anchors as requested)
+function computeAllHexPositionsGlobal(
+  nodes: NodeRow[],
+  containerW: number,
+  containerH: number,
+  xGap = 140
+) {
+  return computeHexPositionsGlobal(nodes, containerW, containerH, xGap);
+}
+
+// PUBLIC API — custom/edit subset (still all-hex grid)
+function computeHexPositionsForSubset(
+  nodesSubset: NodeRow[],
+  containerW: number,
+  containerH: number,
+  xGap = 140
+) {
+  return computeHexPositionsGlobal(nodesSubset, containerW, containerH, xGap);
+}
+
+// Build active subgraph (subset) from selected edges, starting at Specify needs
+function buildActiveSubgraph(
+  allNodes: NodeRow[],
+  allEdges: EdgeRow[],
+  activeEdgeKeys: Set<string>,
+  startId: string
+) {
+  const edgeSet = new Set(activeEdgeKeys);
+  const usedEdges: EdgeRow[] = [];
+  const adj = new Map<string, string[]>();
+  for (const key of edgeSet) {
+    const [s, t] = key.split("->");
+    if (!adj.has(s)) adj.set(s, []);
+    adj.get(s)!.push(t);
+  }
+  // BFS from start over active edges
+  const q: string[] = [];
+  const seen = new Set<string>();
+  if (startId) { q.push(startId); seen.add(startId); }
+  while (q.length) {
+    const u = q.shift()!;
+    for (const v of (adj.get(u) || [])) {
+      if (!seen.has(v)) { seen.add(v); q.push(v); }
+    }
+  }
+  // collect edges used (must be in edgeSet and endpoints within seen)
+  for (const e of allEdges) {
+    const key = `${e.source}->${e.target}`;
+    if (edgeSet.has(key) && seen.has(e.source) && seen.has(e.target)) {
+      usedEdges.push(e);
+    }
+  }
+  const usedNodes = allNodes.filter(n => seen.has(n.NameID));
+  return { usedNodes, usedEdges, reachable: seen };
 }
 
 // -----------------------------
@@ -212,6 +583,24 @@ export default function App() {
   const [selectedName, setSelectedName] = useState<string>(""); // select by Name
   const [selectedGroup, setSelectedGroup] = useState<string>("");
   const [legendActive, setLegendActive] = useState<Set<string>>(new Set(groups)); // families currently visible when legend mode
+
+  const activeFilterLabel = useMemo(() => {
+    if (filterMode === "id" && selectedName) {
+      return `Filter: ${selectedName}`;
+    }
+    if (filterMode === "group" && selectedGroup) {
+      return `Filter: ${selectedGroup} (group)`;
+    }
+    if (filterMode === "legend") {
+      const fams = Array.from(legendActive);
+      if (fams.length === 1) {
+        return `Filter: ${fams[0]} (legend)`;
+      } else if (fams.length > 1) {
+        return `Filter: ${fams.slice(0, 2).join(", ")}${fams.length > 2 ? "…" : ""} (legend)`;
+      }
+    }
+    return null;
+  }, [filterMode, selectedName, selectedGroup, legendActive]);
 
   // Lifecycle editor state
   const [lifecycleMode, setLifecycleMode] = useState<"none" | "create" | "edit">("none");
@@ -255,29 +644,52 @@ export default function App() {
     })();
   }, [base]);
 
-  // Build / rebuild Network
+  // Build / rebuild Network with ALL-HEX positions (static)
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) return;
+
+    // 1) compute fixed hex positions
+    const positions = computeFixedHexPositions(nodes);
+
+    // 2) build datasets with those positions + tooltips in lifecycle modes
     const { visNodes, visEdges } = buildVisDatasets(nodes, edges, {
+      positions,
       showEdgeTooltips: lifecycleMode !== "none",
-      activeNodeIds: lifecycleMode !== "none" ? activeNodeIds : null,
+      activeNodeIds: lifecycleMode !== "none" ? activeNodeIds : null
     });
 
     visNodesRef.current = visNodes;
     visEdgesRef.current = visEdges;
 
-    const net = new Network(containerRef.current, { nodes: visNodes, edges: visEdges }, {
-      autoResize: true,
-      physics: { solver: "forceAtlas2Based", stabilization: { iterations: 150 } },
-      interaction: { hover: true, tooltipDelay: 120, multiselect: true },
-      layout: { improvedLayout: true },
-      edges: { arrows: { to: { enabled: true, scaleFactor: 0.8 } } },
-    });
+    // 3) static network (physics OFF; nodes fixed)
+    const net = new Network(
+      containerRef.current,
+      { nodes: visNodes, edges: visEdges },
+      {
+        autoResize: true,
+        physics: { enabled: false },
+        interaction: {
+          hover: true,
+          tooltipDelay: 120,
+          multiselect: false,
+          dragNodes: false, // KEEP static
+          dragView: true,
+          zoomView: true,
+          selectConnectedEdges: false
+        },
+        layout: { improvedLayout: false }, // we supply positions
+        edges: { arrows: { to: { enabled: true, scaleFactor: 0.8 } }, width: 1.5 }
+      }
+    );
+
+    // 4) small “anti-pierce” curvature on horizontal three-in-a-row cases
+    applyAntiPierce(visEdges, positions, nodes);
+    net.redraw();
+
+    // 5) frame it nicely in view
+    setTimeout(() => net.fit({ animation: { duration: 450, easingFunction: "easeInOutQuad" } }), 30);
 
     networkRef.current = net;
-    // Fit once
-    setTimeout(() => net.fit({ animation: { duration: 600, easingFunction: "easeInOutQuad" } }), 50);
-
     return () => {
       net.destroy();
       networkRef.current = null;
@@ -293,7 +705,7 @@ export default function App() {
     setSelectedName("");
     setSelectedGroup("");
     setLegendActive(new Set(groups));
-    if (networkRef.current && visNodesRef.current && visEdgesRef.current) {
+    if (visNodesRef.current && visEdgesRef.current) {
       clearDimStyles(visNodesRef.current, visEdgesRef.current);
     }
   }
@@ -304,7 +716,7 @@ export default function App() {
     setSelectedGroup("");
     setLegendActive(new Set(groups));
 
-    if (!networkRef.current || !visNodesRef.current || !visEdgesRef.current) return;
+    if (!visNodesRef.current || !visEdgesRef.current) return;
     const id = nameToId[name.toLowerCase()];
     if (!id) return;
 
@@ -334,7 +746,7 @@ export default function App() {
     setSelectedName("");
     setLegendActive(new Set(groups));
 
-    if (!networkRef.current || !visNodesRef.current || !visEdgesRef.current) return;
+    if (!visNodesRef.current || !visEdgesRef.current) return;
     const visNodes = visNodesRef.current;
     const visEdges = visEdgesRef.current;
 
@@ -345,7 +757,6 @@ export default function App() {
     for (const e of visEdges.get()) {
       const from = String(e.from);
       const to = String(e.to);
-      // keep outgoing edges of that group's nodes
       if (groupNodeIds.has(from)) {
         keepEdges.add(String(e.id));
         keepNodes.add(to);
@@ -355,38 +766,39 @@ export default function App() {
   }
 
   function toggleLegendFamily(fam: string) {
-    // switch to legend mode (mutually exclusive with others)
+    if (!visNodesRef.current || !visEdgesRef.current) return;
+
+    // determine next set
+    let nextActive: Set<string>;
     if (filterMode !== "legend") {
-      // isolate-on-first-click behavior
-      setLegendActive(new Set([fam]));
-      setFilterMode("legend");
-      setSelectedName("");
-      setSelectedGroup("");
+      nextActive = new Set([fam]); // isolate-on-first-click
     } else {
-      // Toggle fam on/off within legend mode
-      const next = new Set(legendActive);
-      if (next.has(fam)) next.delete(fam); else next.add(fam);
-      if (next.size === 0) {
-        // avoid empty — keep at least one
-        next.add(fam);
-      }
-      setLegendActive(next);
+      nextActive = new Set(legendActive);
+      if (nextActive.has(fam)) nextActive.delete(fam); else nextActive.add(fam);
+      if (nextActive.size === 0) nextActive.add(fam); // avoid empty
     }
 
-    if (!networkRef.current || !visNodesRef.current || !visEdgesRef.current) return;
+    // compute brightness sets
     const visNodes = visNodesRef.current;
     const visEdges = visEdgesRef.current;
 
-    const activeFamilies = filterMode === "legend" ? legendActive : new Set([fam]);
-    const keepNodes = new Set(nodes.filter((n) => activeFamilies.has(n.Family)).map((n) => n.NameID));
+    const keepNodes = new Set(nodes.filter((n) => nextActive.has(n.Family)).map((n) => n.NameID));
     const keepEdges = new Set<string>();
     for (const e of visEdges.get()) {
       const from = String(e.from);
       const to = String(e.to);
-      if (keepNodes.has(from)) keepEdges.add(String(e.id));
-      if (keepNodes.has(to)) keepNodes.add(to);
+      if (keepNodes.has(from)) {
+        keepEdges.add(String(e.id));
+        keepNodes.add(to);
+      }
     }
+
     applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
+
+    setFilterMode("legend");
+    setSelectedName("");
+    setSelectedGroup("");
+    setLegendActive(nextActive);
   }
 
   // -----------------------------
@@ -411,33 +823,50 @@ export default function App() {
   // -----------------------------
   // Custom Lifecycle: validate + save
   // -----------------------------
-  function validateLifecycle(): { ok: true } | { ok: false; errors: string[] } {
-    const errors: string[] = [];
-    if (!title.trim()) errors.push("Title is required.");
-    if (!description.trim()) errors.push("Description is required.");
-    if (!startNodeId) errors.push("Start node 'Specify needs' not found in All Nodes.");
-    if (!disposeId) errors.push("End node 'Dispose' not found in All Nodes.");
+  function getLifecycleErrors(): string[] {
+    const errs: string[] = [];
 
-    // Reachability
+    if (!title.trim()) errs.push("A Title is required.");
+    if (!description.trim()) errs.push("A Description is required.");
+
+    if (!startNodeId) errs.push("The required start node 'Specify needs' was not found in the master node list.");
+    if (!disposeId) errs.push("The required end node 'Dispose' was not found in the master node list.");
+    if (!startNodeId || !disposeId) return errs;
+
     const reachable = bfsReachable(startNodeId, activeEdgeKeys);
-    if (!reachable.has(disposeId)) errors.push("'Dispose' must be reachable from 'Specify needs'.");
+    if (!reachable.has(disposeId)) errs.push("Your path must allow 'Dispose' to be reachable from 'Specify needs'.");
 
-    // Terminal nodes must be {Dispose, Share}
-    const activeSources = new Set(Array.from(activeEdgeKeys).map((k) => k.split("->")[0]));
-    const terminals = Array.from(reachable).filter((n) => !activeSources.has(n)); // no outgoing active edge
-    for (const t of terminals) {
-      if (t !== disposeId && t !== shareId) {
-        const nodeName = nodeById[t]?.Name || t;
-        errors.push(`Terminal node '${nodeName}' is not allowed (only Dispose or Share).`);
+    // terminals = reachable nodes with no outgoing active edges
+    const terminals = Array.from(reachable).filter((nodeId) => {
+      return !Array.from(activeEdgeKeys).some((key) => key.startsWith(nodeId + "->"));
+    });
+    for (const termId of terminals) {
+      const isDispose = termId === disposeId;
+      const isShare = termId === shareId;
+      if (!isDispose && !isShare) {
+        const nodeName = nodeById[termId]?.Name || termId;
+        errs.push(`The node '${nodeName}' is currently an end point in your flow, but only 'Dispose' or 'Share' can end a branch.`);
       }
     }
 
-    return errors.length ? { ok: false, errors } : { ok: true };
+    // unreachable sources
+    for (const key of activeEdgeKeys) {
+      const [src] = key.split("->");
+      if (!reachable.has(src)) {
+        const srcName = nodeById[src]?.Name || src;
+        errs.push(`You activated an edge from '${srcName}', but '${srcName}' is not reachable from 'Specify needs'.`);
+      }
+    }
+
+    return errs;
   }
 
   function saveLifecycle() {
-    const check = validateLifecycle();
-    if (!("ok" in check) || check.ok !== true) return;
+    const errs = getLifecycleErrors();
+    if (errs.length > 0) {
+      alert("Cannot save. Please fix the following:\n\n" + errs.join("\n"));
+      return;
+    }
 
     // Collect active nodes + edges
     const nodeIds = Array.from(activeNodeIds);
@@ -497,10 +926,6 @@ export default function App() {
     setTitle("");
     setDescription("");
     setActiveEdgeKeys(new Set());
-    // Focus start node on the graph
-    if (networkRef.current && startNodeId) {
-      networkRef.current.focus(startNodeId, { animation: { duration: 500, easingFunction: "easeInOutQuad" } });
-    }
   }
 
   async function handleLifecycleLoad(file: File) {
@@ -523,18 +948,18 @@ export default function App() {
       // Validate strict subset
       const nodeIds = new Set(nodes.map((n) => n.NameID));
       const edgePairs = new Set(edges.map((e) => `${e.source}->${e.target}`));
+      const problems: string[] = [];
 
-      const errors: string[] = [];
       for (const n of inNodes) {
-        const id = n.NameID;
-        if (!id || !nodeIds.has(id)) errors.push(`Nodes sheet: NameID '${id || "(missing)"}' not found in All Nodes`);
+        const id = n?.NameID;
+        if (!id || !nodeIds.has(id)) problems.push(`Nodes sheet: NameID '${id || "(missing)"}' not found in All Nodes`);
       }
       for (const e of inEdges) {
         const key = `${e.source}->${e.target}`;
-        if (!edgePairs.has(key)) errors.push(`Edges sheet: pair '${key}' not found in All Edges`);
+        if (!edgePairs.has(key)) problems.push(`Edges sheet: pair '${key}' not found in All Edges`);
       }
-      if (errors.length) {
-        alert("Import failed:\n" + errors.join("\n"));
+      if (problems.length) {
+        alert("Import failed:\n" + problems.join("\n"));
         return;
       }
 
@@ -543,14 +968,19 @@ export default function App() {
       setTitle(t);
       setDescription(d);
       const next = new Set<string>();
-      for (const e of inEdges) next.add(`${e.source}->${e.target}`);
+      for (const e of inEdges) if (e.source && e.target) next.add(`${e.source}->${e.target}`);
       setActiveEdgeKeys(next);
 
-      setTimeout(() => {
-        if (networkRef.current && startNodeId) networkRef.current.focus(startNodeId, { animation: true });
-      }, 100);
+      // Merge any edge descriptions
+      const merged = edges.slice();
+      for (const imp of inEdges) {
+        if (!imp.source || !imp.target) continue;
+        const idx = merged.findIndex((x) => x.source === imp.source && x.target === imp.target);
+        if (idx >= 0) merged[idx] = { ...merged[idx], description: imp.description ?? merged[idx].description };
+      }
+      setEdges(merged);
     } catch (err: any) {
-      alert("Failed to load lifecycle: " + err?.message);
+      alert("Failed to load lifecycle: " + (err?.message || "Unknown error"));
     }
   }
 
@@ -569,7 +999,7 @@ export default function App() {
           <h2 className="text-lg font-semibold">Lifecycle Builder</h2>
           {lifecycleMode === "none" ? (
             <div className="flex gap-2">
-              <button onClick={startLifecycleCreate} className="px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700">Start Custom Lifecycle</button>
+              <button onClick={startLifecycleCreate} className="px-3 py-1.5 rounded-md bg-black text-white">Start Custom Lifecycle</button>
               <label className="px-3 py-1.5 rounded-md border cursor-pointer bg-white hover:bg-gray-50">
                 Edit Custom Lifecycle
                 <input type="file" accept=".xlsx" className="hidden" onChange={(e) => e.target.files && handleLifecycleLoad(e.target.files[0])} />
@@ -602,85 +1032,147 @@ export default function App() {
             {/* Grouped, collapsible editor */}
             <div className="mt-2">
               {filterableGroups.map((fam) => (
-                <details key={fam} className="border rounded-md mb-2" open>
-                  <summary className="px-3 py-2 cursor-pointer bg-gray-50 font-medium">{fam}</summary>
-                  <div className="p-3 space-y-2">
-                    {nodes.filter((n) => n.Family === fam).map((n) => {
-                      const active = activeNodeIds.has(n.NameID) || n.NameID === startNodeId;
-                      return (
-                        <details key={n.NameID} className="border rounded-md" open={n.NameID === startNodeId}>
-                          <summary className="px-3 py-2 cursor-pointer flex items-center justify-between">
-                            <span className="font-medium">{n.Name}</span>
-                            <span className="text-xs text-gray-500">{active ? "Active" : "Inactive"}</span>
-                          </summary>
-                          <div className="p-3 space-y-2">
-                            <label className="block text-sm text-gray-600">Node description (editable for this lifecycle)</label>
-                            <textarea
-                              disabled={!active}
-                              className="w-full border rounded-md px-3 py-2 disabled:bg-gray-50"
-                              defaultValue={n.Definition}
-                            />
+                <details
+                  key={fam}
+                  className="border rounded-md mb-2 bg-white shadow-sm"
+                  open
+                >
+                  <summary className="px-3 py-2 cursor-pointer bg-gray-100 font-medium text-sm flex items-center justify-between">
+                    <span>{fam}</span>
+                  </summary>
 
-                            {/* Outgoing edges */}
-                            <div className="mt-2 space-y-2">
-                              <div className="text-sm font-medium">Outgoing edges</div>
-                              {(outgoingBySource.get(n.NameID) || []).map((e) => {
-                                const key = `${e.source}->${e.target}`;
-                                const isOn = activeEdgeKeys.has(key);
-                                const targetName = nodeById[e.target]?.Name || e.target;
-                                const canEdit = (n.NameID === startNodeId) || activeNodeIds.has(n.NameID); // source must be active
-                                return (
-                                  <div key={key} className="border rounded-md p-2 flex flex-col gap-2">
-                                    <label className="flex items-center gap-2">
-                                      <input type="checkbox" disabled={!canEdit} checked={isOn} onChange={(ev) => setEdgeActive(e, ev.target.checked)} />
-                                      <span className="text-sm">{n.Name} → {targetName}</span>
-                                    </label>
-                                    <input
-                                      type="text"
-                                      className="border rounded px-2 py-1"
-                                      placeholder="Edge description (optional)"
-                                      value={e.description || ""}
-                                      onChange={(ev) => {
-                                        // live-edit edge description in main edges array
-                                        const val = ev.target.value;
-                                        const idx = edges.findIndex((x) => x.source === e.source && x.target === e.target);
-                                        if (idx >= 0) {
-                                          const next = edges.slice();
-                                          next[idx] = { ...next[idx], description: val };
-                                          setEdges(next);
-                                        }
-                                      }}
-                                    />
-                                  </div>
-                                );
-                              })}
+                  <div className="p-3 space-y-3">
+                    {nodes
+                      .filter((n) => n.Family === fam)
+                      .map((n) => {
+                        const isNodeActive =
+                          activeNodeIds.has(n.NameID) || n.NameID === startNodeId;
+
+                        return (
+                          <details
+                            key={n.NameID}
+                            className={`border rounded-md shadow-sm ${
+                              isNodeActive ? "bg-white" : "bg-gray-50 opacity-60"
+                            }`}
+                            open={n.NameID === startNodeId}
+                          >
+                            <summary className="px-3 py-2 cursor-pointer flex items-center justify-between">
+                              <span className="font-medium text-sm">{n.Name}</span>
+
+                              <span
+                                className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                                  isNodeActive
+                                    ? "bg-emerald-600 text-white"
+                                    : "bg-gray-400 text-white"
+                                }`}
+                              >
+                                {isNodeActive ? "Active" : "Inactive"}
+                              </span>
+                            </summary>
+
+                            <div className="p-3 space-y-3">
+                              {/* Node description editor */}
+                              <div>
+                                <label className="block text-xs text-gray-600 mb-1">
+                                  Node description (editable for this lifecycle)
+                                </label>
+                                <textarea
+                                  disabled={!isNodeActive}
+                                  className="w-full border rounded-md px-3 py-2 disabled:bg-gray-100 disabled:text-gray-500 text-sm focus:outline-none focus:ring-2 focus:ring-black"
+                                  defaultValue={n.Definition}
+                                />
+                              </div>
+
+                              {/* Outgoing edges */}
+                              <div className="space-y-2">
+                                <div className="text-xs font-semibold text-gray-700">
+                                  Outgoing edges
+                                </div>
+
+                                {(outgoingBySource.get(n.NameID) || []).map((e) => {
+                                  const key = `${e.source}->${e.target}`;
+                                  const isEdgeOn = activeEdgeKeys.has(key);
+                                  const targetName =
+                                    nodeById[e.target]?.Name || e.target;
+
+                                  // can only toggle edges from active nodes
+                                  const canEditThisEdge =
+                                    n.NameID === startNodeId ||
+                                    activeNodeIds.has(n.NameID);
+
+                                  return (
+                                    <div
+                                      key={key}
+                                      className={`border rounded-md p-2 flex flex-col gap-2 text-sm shadow-sm ${
+                                        canEditThisEdge ? "bg-white" : "bg-gray-100"
+                                      }`}
+                                    >
+                                      <label className="flex items-center gap-2">
+                                        <input
+                                          type="checkbox"
+                                          disabled={!canEditThisEdge}
+                                          checked={isEdgeOn}
+                                          onChange={(ev) =>
+                                            setEdgeActive(e, ev.target.checked)
+                                          }
+                                        />
+                                        <span className="text-sm">
+                                          {n.Name} → {targetName}
+                                        </span>
+                                      </label>
+
+                                      <input
+                                        type="text"
+                                        className="border rounded px-2 py-1 text-xs disabled:bg-gray-100 disabled:text-gray-500 focus:outline-none focus:ring-2 focus:ring-black"
+                                        placeholder="Edge description (optional)"
+                                        value={e.description || ""}
+                                        onChange={(ev) => {
+                                          const val = ev.target.value;
+                                          const idx = edges.findIndex(
+                                            (x) =>
+                                              x.source === e.source &&
+                                              x.target === e.target
+                                          );
+                                          if (idx >= 0) {
+                                            const next = edges.slice();
+                                            next[idx] = {
+                                              ...next[idx],
+                                              description: val,
+                                            };
+                                            setEdges(next);
+                                          }
+                                        }}
+                                        disabled={!canEditThisEdge}
+                                      />
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        </details>
-                      );
-                    })}
+                          </details>
+                        );
+                      })}
                   </div>
                 </details>
               ))}
             </div>
-
             <div className="flex items-center gap-2">
               <button
-                className="px-3 py-1.5 rounded-md border hover:bg-gray-50"
+                className="px-3 py-1.5 rounded-md bg-black text-white"
                 onClick={() => {
-                  const res = validateLifecycle();
-                  if ((res as any).ok) {
+                  const errs = getLifecycleErrors();
+                  if (errs.length === 0) {
                     alert("Lifecycle valid. You can now Save.");
                   } else {
-                    alert("Validation failed:\n" + (res as any).errors.join("\n"));
+                    alert("Validation failed:\n\n" + errs.join("\n"));
                   }
                 }}
               >
                 Validate
               </button>
               <button
-                className="px-3 py-1.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
-                disabled={!(validateLifecycle() as any).ok}
+                className="px-3 py-1.5 rounded-md bg-black text-white disabled:opacity-50"
+                disabled={getLifecycleErrors().length > 0}
                 onClick={saveLifecycle}
               >
                 Save Lifecycle
@@ -696,29 +1188,36 @@ export default function App() {
         <div className="absolute top-3 left-3 z-10 flex flex-col gap-2 bg-white/80 border rounded-lg p-3 shadow">
           <div className="text-xs font-semibold text-gray-600">View</div>
           <div className="flex gap-2">
-            <button className="px-2 py-1 border rounded hover:bg-gray-50" onClick={zoomIn}>＋</button>
-            <button className="px-2 py-1 border rounded hover:bg-gray-50" onClick={zoomOut}>－</button>
-            <button className="px-2 py-1 border rounded hover:bg-gray-50" onClick={fit}>Fit</button>
+            <button className="px-2 py-1 rounded bg-black text-white" onClick={zoomIn}>＋</button>
+            <button className="px-2 py-1 rounded bg-black text-white" onClick={zoomOut}>－</button>
+            <button className="px-2 py-1 rounded bg-black text-white" onClick={fit}>Fit</button>
           </div>
           <div className="grid grid-cols-3 gap-1">
-            <button className="px-2 py-1 border rounded hover:bg-gray-50" onClick={() => pan(0, 80)}>↑</button>
+            <button className="px-2 py-1 rounded bg-black text-white" onClick={() => pan(0, 80)}>↑</button>
             <div></div>
-            <button className="px-2 py-1 border rounded hover:bg-gray-50" onClick={() => pan(0, -80)}>↓</button>
-            <button className="px-2 py-1 border rounded hover:bg-gray-50" onClick={() => pan(80, 0)}>←</button>
+            <button className="px-2 py-1 rounded bg-black text-white" onClick={() => pan(0, -80)}>↓</button>
+            <button className="px-2 py-1 rounded bg-black text-white" onClick={() => pan(80, 0)}>←</button>
             <div></div>
-            <button className="px-2 py-1 border rounded hover:bg-gray-50" onClick={() => pan(-80, 0)}>→</button>
+            <button className="px-2 py-1 rounded bg-black text-white" onClick={() => pan(-80, 0)}>→</button>
           </div>
         </div>
 
         {/* Filters */}
-        <div className="absolute top-3 right-3 z-10 flex flex-col gap-3 w-[min(420px,calc(100vw-24px))]">
+        <div className="absolute top-3 right-3 z-10 flex flex-col gap-3 w-[min(210px,calc(100vw-48px))]">
+          {activeFilterLabel && (
+            <div className="bg-white/80 border rounded-lg p-2 shadow">
+              <div className="text-[10px] font-semibold text-gray-800 leading-tight break-words max-h-32 overflow-y-auto">
+                {activeFilterLabel}
+              </div>
+            </div>
+          )}
+
           <div className="bg-white/80 border rounded-lg p-3 shadow">
-            <div className="text-xs font-semibold text-gray-600 mb-2">Select by ID (Name)</div>
+            <div className="text-xs font-semibold text-gray-600 mb-2">Select by Name</div>
             <select
               className="w-full border rounded px-2 py-1"
               value={selectedName}
               onChange={(e) => {
-                // switching modes resets others
                 if (e.target.value) applySelectByName(e.target.value); else clearFilters();
               }}
             >
@@ -763,7 +1262,7 @@ export default function App() {
               })}
             </div>
             <div className="mt-3">
-              <button className="px-3 py-1.5 rounded-md border hover:bg-gray-50" onClick={clearFilters}>Clear Filters</button>
+              <button className="px-3 py-1.5 rounded-md bg-black text-white" onClick={clearFilters}>Clear Filters</button>
             </div>
           </div>
         </div>
