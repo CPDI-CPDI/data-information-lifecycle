@@ -91,7 +91,7 @@ function makeUiClasses(isDark: boolean) {
     ? "text-xs font-semibold text-neutral-200 mb-2"
     : "text-xs font-semibold text-neutral-700 mb-2";
 
-  // ✅ Buttons: light = white bg + black text, dark = black bg + white text
+  // Buttons
   const btnPill = isDark
     ? "rounded-md bg-black text-white border border-neutral-700 hover:opacity-90"
     : "rounded-md bg-white text-black border border-neutral-300 hover:bg-neutral-50";
@@ -484,6 +484,49 @@ function buildVisDatasets(
   return { visNodes, visEdges };
 }
 
+// ---------- App state persistence & sharing ----------
+type AppPersist = {
+  lifecycleMode: "none" | "create" | "edit";
+  title: string;
+  description: string;
+  activeEdgeKeys: string[];
+  filterMode: FilterMode;
+  selectedName: string;
+  selectedGroup: string;
+  legendActive: string[];
+  edgeDescriptions: Array<{ source: string; target: string; description?: string }>;
+};
+
+const LS_KEY = "lifecycle_builder_state_v1";
+
+function base64UrlEncode(s: string): string {
+  const b64 = btoa(unescape(encodeURIComponent(s)));
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function base64UrlDecode(s: string): string {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
+  return decodeURIComponent(escape(atob(b64)));
+}
+
+// -----------------------------
+// GLOBAL hold-to-repeat controller
+// -----------------------------
+let __holdTimer: any = null;
+function beginHold(action: () => void) {
+  stopHold();
+  action();
+  __holdTimer = setInterval(action, 16);
+}
+function stopHold() {
+  if (__holdTimer) {
+    clearInterval(__holdTimer);
+    __holdTimer = null;
+  }
+}
+
+// ✅ Pan step doubled (was 1)
+const PAN_STEP = 2;
+
 // -----------------------------
 // Main Component
 // -----------------------------
@@ -510,6 +553,7 @@ export default function App() {
 
   // NEW: for triggering the Edit button's file chooser
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const importJsonRef = useRef<HTMLInputElement | null>(null);
 
   // Originals (for reliable Clear Filters)
   const origNodeStylesRef = useRef<Map<string, { color: any; font: any; opacity?: number }>>(new Map());
@@ -536,6 +580,11 @@ export default function App() {
   const [lifecycleMode, setLifecycleMode] = useState<"none" | "create" | "edit">("none");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+
+  // Dirty tracking
+  const [dirty, setDirty] = useState(false);
+  const markDirty = () => setDirty(true);
+  const markClean = () => setDirty(false);
 
   // Active edges (custom lifecycle) as keys "src->tgt"
   const [activeEdgeKeys, setActiveEdgeKeys] = useState<Set<string>>(new Set());
@@ -570,6 +619,56 @@ export default function App() {
       }
     })();
   }, [base]);
+
+  // After CSVs load, hydrate from URL hash or localStorage
+  useEffect(() => {
+    if (nodes.length === 0 || edges.length === 0) return;
+
+    const applyState = (st: AppPersist) => {
+      setLifecycleMode(st.lifecycleMode);
+      setTitle(st.title || "");
+      setDescription(st.description || "");
+      setActiveEdgeKeys(new Set(st.activeEdgeKeys || []));
+      setFilterMode(st.filterMode ?? null);
+      setSelectedName(st.selectedName || "");
+      setSelectedGroup(st.selectedGroup || "");
+      setLegendActive(new Set(st.legendActive || groups));
+      if (st.edgeDescriptions?.length) {
+        const merged = edges.slice();
+        for (const d of st.edgeDescriptions) {
+          const idx = merged.findIndex((x) => x.source === d.source && x.target === d.target);
+          if (idx >= 0) merged[idx] = { ...merged[idx], description: d.description ?? merged[idx].description };
+        }
+        setEdges(merged);
+      }
+      markClean();
+    };
+
+    const hash = window.location.hash;
+    if (hash.startsWith("#state=")) {
+      try {
+        const decoded = base64UrlDecode(hash.slice(7));
+        const parsed = JSON.parse(decoded) as AppPersist;
+        applyState(parsed);
+        return;
+      } catch (e) {
+        console.warn("Failed to parse state from URL hash:", e);
+      }
+    }
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as AppPersist;
+        applyState(parsed);
+      } else {
+        setLegendActive(new Set(groups));
+      }
+    } catch (e) {
+      console.warn("Failed to parse localStorage state:", e);
+      setLegendActive(new Set(groups));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes.length, edges.length]);
 
   // Build / rebuild Network with fixed hex positions
   useEffect(() => {
@@ -642,7 +741,7 @@ export default function App() {
         moveHandlerRef.current = null;
       }
       if (tipElRef.current) {
-        tipElRef.current.remove();
+        tipElRef.current?.remove();
         tipElRef.current = null;
       }
     };
@@ -727,6 +826,7 @@ export default function App() {
         origEdgeStylesRef.current
       );
     }
+    markDirty();
   }
 
   function applySelectByName(name: string) {
@@ -756,6 +856,7 @@ export default function App() {
       }
     }
     applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
+    markDirty();
   }
 
   function applySelectByGroup(group: string) {
@@ -781,6 +882,7 @@ export default function App() {
       }
     }
     applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
+    markDirty();
   }
 
   function toggleLegendFamily(fam: string) {
@@ -817,11 +919,18 @@ export default function App() {
     setSelectedName("");
     setSelectedGroup("");
     setLegendActive(nextActive);
+    markDirty();
   }
 
   // -----------------------------
-  // Graph controls
+  // Graph controls (fluid zoom, doubled pan speed)
   // -----------------------------
+  function zoomIn(step = 1.01) {
+    networkRef.current?.moveTo({ scale: (networkRef.current?.getScale() || 1) * step });
+  }
+  function zoomOut(step = 1.01) {
+    networkRef.current?.moveTo({ scale: (networkRef.current?.getScale() || 1) / step });
+  }
   function fit() {
     networkRef.current?.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
   }
@@ -832,126 +941,39 @@ export default function App() {
     networkRef.current?.moveTo({ position: { x: p.x - dx / s, y: p.y - dy / s } });
   }
 
-  // Continuous pan (hold via keyboard or mouse)
-  const holdRef = useRef({ up: false, down: false, left: false, right: false, raf: 0 as number | 0, last: 0 });
-  const PAN_SPEED = 260; // px/second at current zoom (feels natural)
-
-  function loopPan(t: number) {
-    const { up, down, left, right, last } = holdRef.current;
-    const any = up || down || left || right;
-    const now = t || performance.now();
-    const dt = Math.min(0.05, (now - (last || now)) / 1000); // clamp big gaps
-    holdRef.current.last = now;
-
-    if (any) {
-      let dx = 0, dy = 0;
-      if (left) dx += PAN_SPEED * dt;
-      if (right) dx -= PAN_SPEED * dt;
-      if (up) dy += PAN_SPEED * dt;
-      if (down) dy -= PAN_SPEED * dt;
-      pan(dx, dy);
-      holdRef.current.raf = requestAnimationFrame(loopPan);
-    } else {
-      holdRef.current.raf = 0 as any;
-    }
-  }
-
-  function startHold(dir: "up" | "down" | "left" | "right") {
-    (holdRef.current as any)[dir] = true;
-    if (!holdRef.current.raf) {
-      holdRef.current.last = performance.now();
-      holdRef.current.raf = requestAnimationFrame(loopPan);
-    }
-  }
-  function stopHold(dir?: "up" | "down" | "left" | "right") {
-    if (dir) (holdRef.current as any)[dir] = false;
-    else {
-      holdRef.current.up = holdRef.current.down = holdRef.current.left = holdRef.current.right = false;
-    }
-    if (!(holdRef.current.up || holdRef.current.down || holdRef.current.left || holdRef.current.right) && holdRef.current.raf) {
-      cancelAnimationFrame(holdRef.current.raf);
-      holdRef.current.raf = 0 as any;
-    }
-  }
-
-  // Progressive Zoom (hold to zoom in/out) + keyboard +/-
-  const zoomHoldRef = useRef({ in: false, out: false, raf: 0 as number | 0, last: 0 });
-  const ZOOM_RATE = 0.9; // per second exponential factor (higher = faster). 0.9 -> ~+90%/sec
-
-  function loopZoom(t: number) {
-    const { in: zin, out: zout, last } = zoomHoldRef.current;
-    const any = zin || zout;
-    const now = t || performance.now();
-    const dt = Math.min(0.05, (now - (last || now)) / 1000);
-    zoomHoldRef.current.last = now;
-
-    if (any && networkRef.current) {
-      const curr = networkRef.current.getScale() || 1;
-      // exponential smooth zoom
-      let next = curr;
-      if (zin) next = curr * Math.exp(ZOOM_RATE * dt);
-      if (zout) next = curr / Math.exp(ZOOM_RATE * dt);
-      networkRef.current.moveTo({ scale: next });
-      zoomHoldRef.current.raf = requestAnimationFrame(loopZoom);
-    } else {
-      zoomHoldRef.current.raf = 0 as any;
-    }
-  }
-
-  function startZoomHold(which: "in" | "out") {
-    (zoomHoldRef.current as any)[which] = true;
-    if (!zoomHoldRef.current.raf) {
-      zoomHoldRef.current.last = performance.now();
-      zoomHoldRef.current.raf = requestAnimationFrame(loopZoom);
-    }
-  }
-  function stopZoomHold(which?: "in" | "out") {
-    if (which) (zoomHoldRef.current as any)[which] = false;
-    else { zoomHoldRef.current.in = zoomHoldRef.current.out = false; }
-    if (!(zoomHoldRef.current.in || zoomHoldRef.current.out) && zoomHoldRef.current.raf) {
-      cancelAnimationFrame(zoomHoldRef.current.raf);
-      zoomHoldRef.current.raf = 0 as any;
-    }
-  }
-
-  function zoomInOnce() {
-    startZoomHold("in");
-    requestAnimationFrame(() => stopZoomHold("in"));
-  }
-  function zoomOutOnce() {
-    startZoomHold("out");
-    requestAnimationFrame(() => stopZoomHold("out"));
-  }
-
-  // Arrow & +/- key handling (hold to pan / zoom)
+  // --- Global stop for holds when mouse/touch released, blur, or hidden ---
   useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
-      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-","_"].includes(e.key)) {
-        e.preventDefault();
-        if (e.key === "ArrowUp") startHold("up");
-        if (e.key === "ArrowDown") startHold("down");
-        if (e.key === "ArrowLeft") startHold("left");
-        if (e.key === "ArrowRight") startHold("right");
-        if (e.key === "+" || e.key === "=") startZoomHold("in");
-        if (e.key === "-" || e.key === "_") startZoomHold("out");
-      }
-    }
-    function onKeyUp(e: KeyboardEvent) {
-      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "+", "=", "-","_"].includes(e.key)) {
-        e.preventDefault();
-        if (e.key === "ArrowUp") stopHold("up");
-        if (e.key === "ArrowDown") stopHold("down");
-        if (e.key === "ArrowLeft") stopHold("left");
-        if (e.key === "ArrowRight") stopHold("right");
-        if (e.key === "+" || e.key === "=") stopZoomHold("in");
-        if (e.key === "-" || e.key === "_") stopZoomHold("out");
-      }
-    }
-    window.addEventListener("keydown", onKeyDown, { passive: false });
-    window.addEventListener("keyup", onKeyUp, { passive: false });
+    const stopAll = () => stopHold();
+    const stopIfHidden = () => { if (document.hidden) stopHold(); };
+    window.addEventListener("mouseup", stopAll);
+    window.addEventListener("touchend", stopAll);
+    window.addEventListener("blur", stopAll);
+    document.addEventListener("visibilitychange", stopIfHidden);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("mouseup", stopAll);
+      window.removeEventListener("touchend", stopAll);
+      window.removeEventListener("blur", stopAll);
+      document.removeEventListener("visibilitychange", stopIfHidden);
+    };
+  }, []);
+
+  // --- Keyboard: same global hold controller for arrows and +/- ---
+  useEffect(() => {
+    const keyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (e.key === "ArrowUp") beginHold(() => pan(0, PAN_STEP));
+      else if (e.key === "ArrowDown") beginHold(() => pan(0, -PAN_STEP));
+      else if (e.key === "ArrowLeft") beginHold(() => pan(PAN_STEP, 0));
+      else if (e.key === "ArrowRight") beginHold(() => pan(-PAN_STEP, 0));
+      else if (e.key === "=" || e.key === "+") beginHold(() => zoomIn(1.01));
+      else if (e.key === "-" || e.key === "_") beginHold(() => zoomOut(1.01));
+    };
+    const keyUp = () => stopHold();
+    window.addEventListener("keydown", keyDown);
+    window.addEventListener("keyup", keyUp);
+    return () => {
+      window.removeEventListener("keydown", keyDown);
+      window.removeEventListener("keyup", keyUp);
     };
   }, []);
 
@@ -989,6 +1011,7 @@ export default function App() {
       a.href = dataURL;
       a.download = `lifecycle_graph_${new Date().toISOString().slice(0,10)}.png`;
       a.click();
+      markClean();
     } catch (err) {
       console.error(err);
       alert("Export failed. Check console for details.");
@@ -996,38 +1019,80 @@ export default function App() {
   }
 
   // -----------------------------
-  // Export as SVG (bitmap-embedded SVG for broad compatibility)
+  // Export SVG (vector snapshot)
   // -----------------------------
   function exportSVG() {
     try {
-      const canvas: HTMLCanvasElement | undefined =
-        (networkRef.current as any)?.canvas?.frame?.canvas;
-
-      if (!canvas) {
-        alert("Canvas not available yet. Try again in a moment.");
+      const net = networkRef.current;
+      const visNodes = visNodesRef.current;
+      const visEdges = visEdgesRef.current;
+      if (!net || !visNodes || !visEdges) {
+        alert("Graph not ready yet.");
         return;
       }
 
-      // Render at 2x into a temp bitmap, then embed in SVG
-      const scale = 2;
-      const w = canvas.width;
-      const h = canvas.height;
+      // Get absolute positions
+      const ids = visNodes.getIds() as (string | number)[];
+      const pos = net.getPositions(ids as (string | number)[] as string[]);
+      const nodeItems = visNodes.get(ids);
 
-      const exportCanvas = document.createElement("canvas");
-      exportCanvas.width = w * scale;
-      exportCanvas.height = h * scale;
-      const ctx = exportCanvas.getContext("2d");
-      if (!ctx) {
-        alert("Could not create export context.");
-        return;
+      // Bounds
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const id of ids) {
+        const p = pos[String(id)];
+        if (!p) continue;
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
       }
-      ctx.scale(scale, scale);
-      ctx.drawImage(canvas, 0, 0);
+      const pad = 60;
+      const width = (maxX - minX) + pad * 2;
+      const height = (maxY - minY) + pad * 2;
 
-      const pngData = exportCanvas.toDataURL("image/png");
+      const toSX = (x: number) => (x - minX) + pad;
+      const toSY = (y: number) => (y - minY) + pad;
+
+      const edgeItems = visEdges.get();
+      const defs = `
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z"></path>
+          </marker>
+        </defs>
+      `;
+
+      const edgesSvg = edgeItems.map((e: any) => {
+        const from = pos[String(e.from)];
+        const to = pos[String(e.to)];
+        if (!from || !to) return "";
+        const color = e.color?.color || "#555";
+        return `<line x1="${toSX(from.x)}" y1="${toSY(from.y)}" x2="${toSX(to.x)}" y2="${toSY(to.y)}" stroke="${color}" stroke-width="${e.__origWidth ?? 1.5}" marker-end="url(#arrow)" />`;
+      }).join("\n");
+
+      const nodesSvg = (nodeItems as any[]).map((n) => {
+        const p = pos[String(n.id)];
+        if (!p) return "";
+        const radius = Math.max(6, Math.min(16, Number(n.size ?? 12)));
+        const fill = n.color?.background || "#e5e7eb";
+        const stroke = n.color?.border || "#111827";
+        const rawLabel = (n.label ?? "").toString();
+        const label = rawLabel.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return `
+          <g>
+            <circle cx="${toSX(p.x)}" cy="${toSY(p.y)}" r="${radius}" fill="${fill}" stroke="${stroke}" stroke-width="1.5" />
+            <text x="${toSX(p.x)}" y="${toSY(p.y) - radius - 6}" font-family="ui-sans-serif, system-ui" font-size="10" text-anchor="middle" fill="#111">
+              ${label}
+            </text>
+          </g>
+        `;
+      }).join("\n");
+
       const svg = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-          <image href="${pngData}" x="0" y="0" width="${w}" height="${h}" />
+        <svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(width)}" height="${Math.round(height)}" viewBox="0 0 ${Math.round(width)} ${Math.round(height)}">
+          ${defs}
+          <g>${edgesSvg}</g>
+          <g>${nodesSvg}</g>
         </svg>
       `.trim();
 
@@ -1038,9 +1103,10 @@ export default function App() {
       a.download = `lifecycle_graph_${new Date().toISOString().slice(0,10)}.svg`;
       a.click();
       URL.revokeObjectURL(url);
+      markClean();
     } catch (err) {
       console.error(err);
-      alert("Export failed. Check console for details.");
+      alert("SVG export failed. Check console for details.");
     }
   }
 
@@ -1123,6 +1189,8 @@ export default function App() {
 
     const safeTitle = (title || "CustomLifecycle").replace(/[^a-z0-9]+/gi, "_");
     XLSX.writeFile(wb, `${safeTitle}_${now.toISOString().slice(0, 10)}.xlsx`);
+
+    markClean();
   }
 
   function setEdgeActive(edge: EdgeRow, active: boolean) {
@@ -1131,6 +1199,7 @@ export default function App() {
     if (active) next.add(key);
     else next.delete(key);
     setActiveEdgeKeys(next);
+    markDirty();
   }
 
   function resetLifecycle() {
@@ -1139,6 +1208,7 @@ export default function App() {
     setDescription("");
     setActiveEdgeKeys(new Set());
     clearFilters();
+    markDirty();
   }
 
   function startLifecycleCreate() {
@@ -1146,6 +1216,7 @@ export default function App() {
     setTitle("");
     setDescription("");
     setActiveEdgeKeys(new Set());
+    markDirty();
   }
 
   async function handleLifecycleLoad(file: File) {
@@ -1159,8 +1230,7 @@ export default function App() {
       const inNodes = XLSX.utils.sheet_to_json<NodeRow>(wsNodes);
       const inEdges = XLSX.utils.sheet_to_json<EdgeRow>(wsEdges);
       const metaAoa = XLSX.utils.sheet_to_json<any>(wsMeta, { header: 1 }) as any[][];
-      let t = "",
-        d = "";
+      let t = "", d = "";
       if (metaAoa && metaAoa[1]) {
         t = metaAoa[1][0] || "";
         d = metaAoa[1][1] || "";
@@ -1200,6 +1270,7 @@ export default function App() {
         if (idx >= 0) merged[idx] = { ...merged[idx], description: imp.description ?? merged[idx].description };
       }
       setEdges(merged);
+      markDirty();
     } catch (err: any) {
       alert("Failed to load lifecycle: " + (err?.message || "Unknown error"));
     }
@@ -1213,6 +1284,110 @@ export default function App() {
   const filterableGroups = useMemo(() => Array.from(new Set(filterableNodes.map((n) => n.Family))).sort(), [filterableNodes]);
 
   const activeLabelTextClass = isDark ? "text-neutral-100" : "text-gray-800";
+
+  // -----------------------------
+  // AUTOSAVE (debounced) & UNLOAD GUARD
+  // -----------------------------
+  const snapshot = useMemo<AppPersist>(() => {
+    const edgeDescriptions = edges.map(e => ({ source: e.source, target: e.target, description: e.description }));
+    return {
+      lifecycleMode,
+      title,
+      description,
+      activeEdgeKeys: Array.from(activeEdgeKeys),
+      filterMode,
+      selectedName,
+      selectedGroup,
+      legendActive: Array.from(legendActive),
+      edgeDescriptions,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lifecycleMode, title, description, activeEdgeKeys, filterMode, selectedName, selectedGroup, legendActive, edges]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify(snapshot));
+      } catch (e) {
+        console.warn("localStorage save failed", e);
+      }
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [snapshot]);
+
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
+
+  // -----------------------------
+  // Export / Import JSON & Share Link
+  // -----------------------------
+  function exportJSON() {
+    try {
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `lifecycle_state_${new Date().toISOString().slice(0,10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      markClean();
+    } catch (e) {
+      console.error(e);
+      alert("JSON export failed.");
+    }
+  }
+
+  function importJSON(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as AppPersist;
+        const encoded = base64UrlEncode(JSON.stringify(parsed));
+        window.location.hash = `#state=${encoded}`;
+        setLifecycleMode(parsed.lifecycleMode);
+        setTitle(parsed.title || "");
+        setDescription(parsed.description || "");
+        setActiveEdgeKeys(new Set(parsed.activeEdgeKeys || []));
+        setFilterMode(parsed.filterMode ?? null);
+        setSelectedName(parsed.selectedName || "");
+        setSelectedGroup(parsed.selectedGroup || "");
+        setLegendActive(new Set(parsed.legendActive || groups));
+        if (parsed.edgeDescriptions?.length) {
+          const merged = edges.slice();
+          for (const d of parsed.edgeDescriptions) {
+            const idx = merged.findIndex((x) => x.source === d.source && x.target === d.target);
+            if (idx >= 0) merged[idx] = { ...merged[idx], description: d.description ?? merged[idx].description };
+          }
+          setEdges(merged);
+        }
+        markClean();
+      } catch (e) {
+        console.error(e);
+        alert("Invalid JSON file.");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  async function copyShareLink() {
+    try {
+      const encoded = base64UrlEncode(JSON.stringify(snapshot));
+      const url = `${location.origin}${location.pathname}${location.search}#state=${encoded}`;
+      await navigator.clipboard.writeText(url);
+      alert("Share link copied to clipboard!");
+      markClean();
+    } catch (e) {
+      console.error(e);
+      alert("Could not copy link. Your browser may block clipboard access.");
+    }
+  }
 
   // -----------------------------
   // Render
@@ -1274,13 +1449,13 @@ export default function App() {
                   className={ui.input}
                   placeholder="Lifecycle Title"
                   value={title}
-                  onChange={(e) => setTitle(e.target.value)}
+                  onChange={(e) => { setTitle(e.target.value); markDirty(); }}
                 />
                 <textarea
                   className={ui.input}
                   placeholder="Lifecycle Description"
                   value={description}
-                  onChange={(e) => setDescription(e.target.value)}
+                  onChange={(e) => { setDescription(e.target.value); markDirty(); }}
                   rows={3}
                 />
               </div>
@@ -1328,6 +1503,7 @@ export default function App() {
                                     disabled={!isNodeActive}
                                     className={`${ui.input} disabled:bg-opacity-60`}
                                     defaultValue={n.Definition}
+                                    onChange={markDirty}
                                   />
                                 </div>
 
@@ -1378,6 +1554,7 @@ export default function App() {
                                               const next = edges.slice();
                                               next[idx] = { ...next[idx], description: val };
                                               setEdges(next);
+                                              markDirty();
                                             }
                                           }}
                                           disabled={!canEditThisEdge}
@@ -1419,7 +1596,7 @@ export default function App() {
               disabled={getLifecycleErrors().length > 0}
               onClick={saveLifecycle}
             >
-              Save Lifecycle
+              Save Lifecycle (XLSX)
             </button>
           </div>
         )}
@@ -1427,78 +1604,57 @@ export default function App() {
 
       {/* Right Pane */}
       <section className="relative">
-        {/* EXPORT (top-left) */}
+        {/* Export (top-left) */}
         <div className={`absolute top-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
           <div className={ui.panelTitle}>Export</div>
-          <div className="flex gap-2">
-            <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportPNG}>PNG</button>
-            <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportSVG}>SVG</button>
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2">
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportPNG}>PNG</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportSVG}>SVG</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportJSON}>JSON</button>
+            </div>
+            <div className="flex gap-2">
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={copyShareLink}>Copy Share Link</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={() => importJsonRef.current?.click()}>Import JSON</button>
+              <input
+                ref={importJsonRef}
+                className="hidden"
+                type="file"
+                accept="application/json"
+                onChange={(e) => e.target.files && importJSON(e.target.files[0])}
+              />
+            </div>
           </div>
         </div>
 
-        {/* VIEW (bottom-left) */}
+        {/* View (bottom-left) */}
         <div className={`absolute bottom-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
           <div className={ui.panelTitle}>View</div>
           <div className="grid grid-cols-3 gap-1">
-            <div className="w-8 h-8" />
-            <button
-              aria-label="Pan Up"
-              className={`w-8 h-8 flex items-center justify-center ${ui.btnPill}`}
-              onMouseDown={() => startHold("up")}
-              onMouseUp={() => stopHold("up")}
-              onMouseLeave={() => stopHold("up")}
-            >↑</button>
-            <div className="w-8 h-8" />
-
-            <button
-              aria-label="Pan Left"
-              className={`w-8 h-8 flex items-center justify-center ${ui.btnPill}`}
-              onMouseDown={() => startHold("left")}
-              onMouseUp={() => stopHold("left")}
-              onMouseLeave={() => stopHold("left")}
-            >←</button>
-            <button
-              aria-label="Pan Down"
-              className={`w-8 h-8 flex items-center justify-center ${ui.btnPill}`}
-              onMouseDown={() => startHold("down")}
-              onMouseUp={() => stopHold("down")}
-              onMouseLeave={() => stopHold("down")}
-            >↓</button>
-            <button
-              aria-label="Pan Right"
-              className={`w-8 h-8 flex items-center justify-center ${ui.btnPill}`}
-              onMouseDown={() => startHold("right")}
-              onMouseUp={() => stopHold("right")}
-              onMouseLeave={() => stopHold("right")}
-            >→</button>
+            <div />
+            {/* Up */}
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(0, PAN_STEP))}>↑</HoldButton>
+            <div />
+            {/* Left */}
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(PAN_STEP, 0))}>←</HoldButton>
+            {/* Down */}
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(0, -PAN_STEP))}>↓</HoldButton>
+            {/* Right */}
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(-PAN_STEP, 0))}>→</HoldButton>
           </div>
         </div>
 
-        {/* ZOOM (bottom-right) — horizontal with hold */}
+        {/* Zoom (bottom-right) as horizontal: +  -  Fit */}
         <div className={`absolute bottom-3 right-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
           <div className={ui.panelTitle}>Zoom</div>
-          <div className="flex gap-2 items-center">
-            <button
-              className={`w-10 h-8 flex items-center justify-center ${ui.btnPill}`}
-              aria-label="Zoom In"
-              onMouseDown={() => startZoomHold("in")}
-              onMouseUp={() => stopZoomHold("in")}
-              onMouseLeave={() => stopZoomHold("in")}
-              onClick={zoomInOnce}
-            >＋</button>
-            <button
-              className={`w-10 h-8 flex items-center justify-center ${ui.btnPill}`}
-              aria-label="Zoom Out"
-              onMouseDown={() => startZoomHold("out")}
-              onMouseUp={() => stopZoomHold("out")}
-              onMouseLeave={() => stopZoomHold("out")}
-              onClick={zoomOutOnce}
-            >－</button>
+          <div className="flex items-center gap-2">
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomIn(1.01))}>＋</HoldButton>
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomOut(1.01))}>－</HoldButton>
             <button className={`px-2 py-1 ${ui.btnPill}`} onClick={fit}>Fit</button>
           </div>
         </div>
 
-        {/* Filters */}
+        {/* Filters (top-right) */}
         <div className="absolute top-3 right-3 z-10 flex flex-col gap-3 w-[min(210px,calc(100vw-48px))]">
           {activeFilterLabel && (
             <div className={`rounded-lg p-2 shadow ${ui.panel}`}>
@@ -1575,5 +1731,29 @@ export default function App() {
         <div ref={containerRef} className="w-full h-[calc(100vh-0px)]" />
       </section>
     </div>
+  );
+}
+
+/** Small hold-to-repeat button helper using the global controller */
+function HoldButton({
+  className,
+  onHold,
+  children,
+}: {
+  className?: string;
+  onHold: () => void;
+  children: any;
+}) {
+  return (
+    <button
+      className={className}
+      onMouseDown={() => onHold()}   // beginHold is called in the handler passed in
+      onMouseUp={() => stopHold()}
+      onMouseLeave={() => stopHold()}
+      onTouchStart={() => onHold()}
+      onTouchEnd={() => stopHold()}
+    >
+      {children}
+    </button>
   );
 }
