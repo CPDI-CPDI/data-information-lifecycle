@@ -39,8 +39,8 @@ export type EdgeRow = {
 };
 
 // =================== HEX LAYOUT CONFIG ===================
-const GAP_X = 180; // tweak freely
-const GAP_Y = 140; // tweak freely
+const GAP_X = 180;
+const GAP_Y = 140;
 
 // Row counts 5,4,4,4. Offsets provide the staggered hex pattern.
 const HEX_ROWS = [
@@ -61,7 +61,7 @@ const ANCHORS: Record<string, { r: number; c: number }> = {
   dispose: { r: 3, c: 3 },
 };
 
-const padLabel = (s: string) => `\u2007${s}\u2007`; // figure spaces ≈ 2px each side at this size
+const padLabel = (s: string) => `\u2007${s}\u2007`; // thin padding around labels
 
 // ── THEME HELPERS ─────────────────────────────────────────────
 function usePrefersDark() {
@@ -96,14 +96,18 @@ function makeUiClasses(isDark: boolean) {
     ? "rounded-md bg-black text-white border border-neutral-700 hover:opacity-90"
     : "rounded-md bg-white text-black border border-neutral-300 hover:bg-neutral-50";
 
-  // Legend chips — forced high contrast per theme
-  const chipActive = isDark
-    ? "!bg-black !text-white !border-neutral-700 hover:opacity-90"
-    : "!bg-white !text-black !border-neutral-300 hover:bg-neutral-50";
+  // Legend chips — common base: uniform width + centered text
+  const chipBase = "rounded-full text-sm text-center px-3 py-1 min-w-[160px]";
 
+  // High-contrast per theme
+  const chipActive = isDark
+    ? "!bg-black !text-white !border !border-neutral-700 font-semibold shadow-sm hover:opacity-90"
+    : "!bg-white !text-black !border !border-neutral-300 font-semibold shadow-sm hover:bg-neutral-50";
+
+  // Inactive looks clearly “off”
   const chipInactive = isDark
-    ? "!bg-black/80 !text-white/80 !border-neutral-700 hover:bg-black"
-    : "!bg-white !text-black/70 !border-neutral-300 hover:bg-neutral-50";
+    ? "!bg-black/80 !text-white/60 !border !border-neutral-700 opacity-60 hover:bg-black"
+    : "!bg-white !text-black/60 !border !border-neutral-300 opacity-60 hover:bg-neutral-50";
 
   const divider = isDark ? "border-neutral-700" : "border-neutral-200";
   const asideBg = isDark ? "bg-neutral-950 text-white" : "bg-white text-black";
@@ -119,6 +123,7 @@ function makeUiClasses(isDark: boolean) {
     panel,
     panelTitle,
     btnPill,
+    chipBase,
     chipActive,
     chipInactive,
     divider,
@@ -186,21 +191,17 @@ function applyAntiPierce(visEdges: DataSet<VisEdge>, positions: Record<string, {
   const edges = visEdges.get();
   const nodeIds = Object.keys(positions);
 
-  // approximate node radius (px)
   const HIT_R = 18;
   const PADDING = 6;
   const THRESH = HIT_R + PADDING;
 
   function distPointToSeg(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
-    const abx = bx - ax,
-      aby = by - ay;
-    const apx = px - ax,
-      apy = py - ay;
+    const abx = bx - ax, aby = by - ay;
+    const apx = px - ax, apy = py - ay;
     const ab2 = abx * abx + aby * aby || 1;
     let t = (apx * abx + apy * aby) / ab2;
     t = Math.max(0, Math.min(1, t));
-    const qx = ax + t * abx,
-      qy = ay + t * aby;
+    const qx = ax + t * abx, qy = ay + t * aby;
     return Math.hypot(px - qx, py - qy);
   }
 
@@ -218,17 +219,12 @@ function applyAntiPierce(visEdges: DataSet<VisEdge>, positions: Record<string, {
       if (nid === from || nid === to) continue;
       const P = positions[nid];
       const d = distPointToSeg(P.x, P.y, A.x, A.y, B.x, B.y);
-      if (d < THRESH) {
-        pierces = true;
-        break;
-      }
+      if (d < THRESH) { pierces = true; break; }
     }
 
     if (pierces) {
-      const vx = B.x - A.x,
-        vy = B.y - A.y;
-      const mx = (A.x + B.x) / 2,
-        my = (A.y + B.y) / 2;
+      const vx = B.x - A.x, vy = B.y - A.y;
+      const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
       const cross = vx * (my - A.y) - vy * (mx - A.x);
       updates.push({
         id: e.id!,
@@ -261,12 +257,12 @@ function makeColorForFamily(
   family: string
 ): { border: string; background: string; highlight: { border: string; background: string } } {
   const PALETTE: Record<string, { bg: string; border: string; hiBg?: string; hiBorder?: string }> = {
-    INITIATION: { bg: "#A7C6ED", border: "#3B82F6" }, // blue-ish
-    ACQUISITION: { bg: "#FFE866", border: "#F59E0B" }, // yellow
-    CONFIGURATION: { bg: "#FF9AA2", border: "#DC2626" }, // red
-    PROCESSING: { bg: "#A7E07A", border: "#16A34A" }, // green
-    LEVERAGING: { bg: "#F1A7FF", border: "#A21CAF" }, // magenta
-    DISPOSITION: { bg: "#C4B5FD", border: "#7C3AED" }, // purple
+    INITIATION: { bg: "#A7C6ED", border: "#3B82F6" },
+    ACQUISITION: { bg: "#FFE866", border: "#F59E0B" },
+    CONFIGURATION: { bg: "#FF9AA2", border: "#DC2626" },
+    PROCESSING: { bg: "#A7E07A", border: "#16A34A" },
+    LEVERAGING: { bg: "#F1A7FF", border: "#A21CAF" },
+    DISPOSITION: { bg: "#C4B5FD", border: "#7C3AED" },
 
     // Long display names (if your CSV uses these)
     "Plan, design & enable": { bg: "#A7C6ED", border: "#3B82F6" },
@@ -293,8 +289,7 @@ function makeColorForFamily(
   let h = 0;
   for (let i = 0; i < family.length; i++) h = (h * 31 + family.charCodeAt(i)) >>> 0;
   const hue = h % 360;
-  const sat = 55,
-    light = 72;
+  const sat = 55, light = 72;
   const color = `hsl(${hue} ${sat}% ${light}%)`;
   const border = `hsl(${hue} ${sat + 10}% ${Math.max(35, light - 25)}%)`;
   const hiBg = `hsl(${hue} ${sat + 5}% ${Math.min(92, light + 15)}%)`;
@@ -302,10 +297,26 @@ function makeColorForFamily(
   return { border, background: color, highlight: { border: hiBorder, background: hiBg } };
 }
 
+// 3-word associations per family
+const FAMILY_META: Record<string, { main: string; three: string }> = {
+  INITIATION: { main: "initiation", three: "plan, design & enable" },
+  ACQUISITION: { main: "acquisition", three: "create, capture & collect" },
+  CONFIGURATION: { main: "configuration", three: "organize, store & maintain" },
+  PROCESSING: { main: "processing", three: "provision, integrate & curate" },
+  LEVERAGING: { main: "leveraging", three: "access, use & share" },
+  DISPOSITION: { main: "disposition", three: "archive, transfer & destroy" },
+};
+
 // -----------------------------
 // Graph + Filtering logic
 // -----------------------------
 type FilterMode = null | "id" | "group" | "legend";
+
+// Stronger dim for “not kept”
+const DIM_NODE_OPACITY = 0.12;
+const DIM_FONT_COLOR = "#6b7280"; // gray-500
+const DIM_EDGE_COLOR = "#e5e7eb"; // gray-200
+const DIM_EDGE_WIDTH = 0.5;
 
 // Reversible dimming using stored originals on each item
 function applyDimStyles(
@@ -319,10 +330,10 @@ function applyDimStyles(
     const keep = keepNodeIds.has(String(n.id));
     nodeUpdates.push({
       id: n.id as any,
-      opacity: keep ? 1.0 : 0.25,
+      opacity: keep ? 1.0 : DIM_NODE_OPACITY,
       font: keep
         ? (n as any).__origFont
-        : { ...(n as any).__origFont, color: "#9ca3af", background: "#000000" },
+        : { ...(n as any).__origFont, color: DIM_FONT_COLOR, background: "#000000" },
       color: (n as any).__origColor,
     });
   }
@@ -332,8 +343,8 @@ function applyDimStyles(
     const keep = keepEdgeIds.has(String(e.id));
     edgeUpdates.push({
       id: e.id as any,
-      color: keep ? (e as any).__origColor : { color: "#d1d5db" },
-      width: (e as any).__origWidth,
+      color: keep ? (e as any).__origColor : { color: DIM_EDGE_COLOR },
+      width: keep ? (e as any).__origWidth : DIM_EDGE_WIDTH,
     });
   }
 
@@ -495,6 +506,7 @@ type AppPersist = {
   selectedGroup: string;
   legendActive: string[];
   edgeDescriptions: Array<{ source: string; target: string; description?: string }>;
+  nodeDescriptions?: Array<{ NameID: string; Definition: string }>;
 };
 
 const LS_KEY = "lifecycle_builder_state_v1";
@@ -524,7 +536,7 @@ function stopHold() {
   }
 }
 
-// ✅ Pan step doubled (was 1)
+// ✅ Pan step (kept at 2)
 const PAN_STEP = 2;
 
 // -----------------------------
@@ -536,6 +548,14 @@ export default function App() {
   const isDark = usePrefersDark();
   const ui = makeUiClasses(isDark);
 
+  // UI state for left-pane disclosure + refs to scroll/focus nodes
+  const [openFamilies, setOpenFamilies] = useState<Record<string, boolean>>({});
+  const leftPaneRef = useRef<HTMLDivElement | null>(null);
+  const nodeDetailsRefs = useRef<Record<string, HTMLDetailsElement | null>>({});
+
+  // Per-node description overrides (by NameID)
+  const [nodeDesc, setNodeDesc] = useState<Record<string, string>>({});
+
   // Data
   const [nodes, setNodes] = useState<NodeRow[]>([]);
   const [edges, setEdges] = useState<EdgeRow[]>([]);
@@ -544,6 +564,7 @@ export default function App() {
   const nodeById = useMemo(() => Object.fromEntries(nodes.map((n) => [n.NameID, n])), [nodes]);
   const nameToId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.Name.toLowerCase(), n.NameID])), [nodes]);
   const groups = useMemo(() => Array.from(new Set(nodes.map((n) => n.Family))).sort(), [nodes]);
+  
 
   // Graph
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -551,7 +572,7 @@ export default function App() {
   const visNodesRef = useRef<DataSet<VisNode> | null>(null);
   const visEdgesRef = useRef<DataSet<VisEdge> | null>(null);
 
-  // NEW: for triggering the Edit button's file chooser
+  // File inputs
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const importJsonRef = useRef<HTMLInputElement | null>(null);
 
@@ -620,7 +641,7 @@ export default function App() {
     })();
   }, [base]);
 
-  // After CSVs load, hydrate from URL hash or localStorage
+  // Hydrate from URL hash or localStorage after data is ready
   useEffect(() => {
     if (nodes.length === 0 || edges.length === 0) return;
 
@@ -640,6 +661,13 @@ export default function App() {
           if (idx >= 0) merged[idx] = { ...merged[idx], description: d.description ?? merged[idx].description };
         }
         setEdges(merged);
+      }
+      if (st.nodeDescriptions && st.nodeDescriptions.length) {
+        const merged: Record<string, string> = {};
+        for (const { NameID, Definition } of st.nodeDescriptions) {
+          if (NameID && typeof Definition === "string") merged[NameID] = Definition;
+        }
+        setNodeDesc(merged);
       }
       markClean();
     };
@@ -680,6 +708,7 @@ export default function App() {
       ? nodes
       : nodes.filter(n => activeNodeIds.has(n.NameID));
 
+    
     const baseEdges = lifecycleMode === "none"
       ? edges
       : edges.filter(e => activeEdgeKeys.has(`${e.source}->${e.target}`));
@@ -766,7 +795,7 @@ export default function App() {
       moveHandlerRef.current = onMove;
     };
 
-    // Node tooltips: "Name: Definition"
+    // Node tooltips
     net.on("hoverNode", (params: any) => {
       const item = visNodesRef.current!.get(params.node) as any;
       const name = (item && item.label) || nodeById[String(params.node)]?.Name || "";
@@ -776,7 +805,7 @@ export default function App() {
     });
     net.on("blurNode", () => hideTip());
 
-    // Edge tooltips (merged text already in .title)
+    // Edge tooltips
     net.on("hoverEdge", (params: any) => {
       const item = visEdgesRef.current!.get(params.edge) as any;
       const text = (item && item.title) ? String(item.title) : "";
@@ -790,7 +819,7 @@ export default function App() {
     net.on("dragEnd", hideTip);
 
     net.setOptions({
-      nodes: { labelHighlightBold: true },       // bold labels on hover/selection
+      nodes: { labelHighlightBold: true },
       interaction: { hover: true, tooltipDelay: 0 }
     });
 
@@ -809,6 +838,30 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges, lifecycleMode, activeNodeIds]);
+
+  // Ensure a family is open and scroll the left pane so a node is visible
+  function openFamilyAndScrollToNode(nodeId: string) {
+    const node = nodeById[nodeId];
+    if (!node) return;
+    const fam = node.Family;
+
+    // Open the <details> for this family
+    setOpenFamilies(prev => ({ ...prev, [fam]: true }));
+
+    // Defer to next paint so the <details> renders before measuring
+    requestAnimationFrame(() => {
+      const el = nodeDetailsRefs.current[nodeId];
+      const scroller = leftPaneRef.current;
+      if (!el || !scroller) return;
+
+      // Smoothly bring the node card into view within the left scroller
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+
+      // Brief highlight to help the eye
+      el.classList.add("outline-2", "outline-emerald-500", "outline");
+      setTimeout(() => el.classList.remove("outline-2", "outline-emerald-500", "outline"), 900);
+    });
+  }
 
   // -----------------------------
   // Filtering behaviours
@@ -829,6 +882,7 @@ export default function App() {
     markDirty();
   }
 
+  // Keep: selected node, its outgoing edges, and those edges’ destination nodes (no incoming)
   function applySelectByName(name: string) {
     setFilterMode("id");
     setSelectedName(name);
@@ -839,6 +893,9 @@ export default function App() {
     const id = nameToId[name.toLowerCase()];
     if (!id) return;
 
+    // Open the family & scroll to the node's editor on selection
+    openFamilyAndScrollToNode(id);
+
     const visNodes = visNodesRef.current!;
     const visEdges = visEdgesRef.current!;
 
@@ -846,12 +903,10 @@ export default function App() {
     const keepEdges = new Set<string>();
 
     for (const e of visEdges.get()) {
-      const eid = String(e.id);
       const from = String(e.from);
       const to = String(e.to);
-      if (from === id || to === id) {
-        keepEdges.add(eid);
-        keepNodes.add(from);
+      if (from === id) {
+        keepEdges.add(String(e.id));
         keepNodes.add(to);
       }
     }
@@ -859,17 +914,19 @@ export default function App() {
     markDirty();
   }
 
+  // Keep: nodes in group, their outgoing edges, and the destination nodes
   function applySelectByGroup(group: string) {
     setFilterMode("group");
     setSelectedGroup(group);
     setSelectedName("");
-    setLegendActive(new Set(groups));
+    setLegendActive(new Set(groups)); // keep as-is; filter semantics are driven by selectedGroup
 
     if (!visNodesRef.current || !visEdgesRef.current) return;
     const visNodes = visNodesRef.current;
     const visEdges = visEdgesRef.current;
 
-    const groupNodeIds = new Set(nodes.filter((n) => n.Family === group).map((n) => n.NameID));
+    const familyNodes = nodes.filter((n) => n.Family === group).sort((a,b)=>a.Name.localeCompare(b.Name));
+    const groupNodeIds = new Set(familyNodes.map((n) => n.NameID));
     const keepNodes = new Set<string>(groupNodeIds);
     const keepEdges = new Set<string>();
 
@@ -882,48 +939,23 @@ export default function App() {
       }
     }
     applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
+
+    // 🔎 polish: open that family and scroll to its first node
+    const firstId = familyNodes[0]?.NameID;
+    if (firstId) openFamilyAndScrollToNode(firstId);
+
     markDirty();
   }
 
+
+  // Legend chips = exact same semantics as Select by Group
   function toggleLegendFamily(fam: string) {
-    if (!visNodesRef.current || !visEdgesRef.current) return;
-
-    // next active set
-    let nextActive: Set<string>;
-    if (filterMode !== "legend") {
-      nextActive = new Set([fam]);
-    } else {
-      nextActive = new Set(legendActive);
-      if (nextActive.has(fam)) nextActive.delete(fam);
-      else nextActive.add(fam);
-      if (nextActive.size === 0) nextActive.add(fam);
-    }
-
-    const visNodes = visNodesRef.current;
-    const visEdges = visEdgesRef.current;
-
-    const keepNodes = new Set(nodes.filter((n) => nextActive.has(n.Family)).map((n) => n.NameID));
-    const keepEdges = new Set<string>();
-    for (const e of visEdges.get()) {
-      const from = String(e.from);
-      const to = String(e.to);
-      if (keepNodes.has(from)) {
-        keepEdges.add(String(e.id));
-        keepNodes.add(to);
-      }
-    }
-
-    applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
-
-    setFilterMode("legend");
-    setSelectedName("");
-    setSelectedGroup("");
-    setLegendActive(nextActive);
-    markDirty();
+    // just delegate to the same handler
+    applySelectByGroup(fam);
   }
 
   // -----------------------------
-  // Graph controls (fluid zoom, doubled pan speed)
+  // Graph controls (fluid zoom, pan step = 2)
   // -----------------------------
   function zoomIn(step = 1.01) {
     networkRef.current?.moveTo({ scale: (networkRef.current?.getScale() || 1) * step });
@@ -941,7 +973,7 @@ export default function App() {
     networkRef.current?.moveTo({ position: { x: p.x - dx / s, y: p.y - dy / s } });
   }
 
-  // --- Global stop for holds when mouse/touch released, blur, or hidden ---
+  // --- Global stop for holds ---
   useEffect(() => {
     const stopAll = () => stopHold();
     const stopIfHidden = () => { if (document.hidden) stopHold(); };
@@ -957,7 +989,7 @@ export default function App() {
     };
   }, []);
 
-  // --- Keyboard: same global hold controller for arrows and +/- ---
+  // --- Keyboard holds for arrows and +/- ---
   useEffect(() => {
     const keyDown = (e: KeyboardEvent) => {
       if (e.repeat) return;
@@ -978,7 +1010,7 @@ export default function App() {
   }, []);
 
   // -----------------------------
-  // Export current graph as PNG
+  // Export & Share
   // -----------------------------
   function exportPNG() {
     try {
@@ -990,7 +1022,7 @@ export default function App() {
         return;
       }
 
-      const scale = 2; // 2x export
+      const scale = 2;
       const w = canvas.width;
       const h = canvas.height;
 
@@ -1018,9 +1050,6 @@ export default function App() {
     }
   }
 
-  // -----------------------------
-  // Export SVG (vector snapshot)
-  // -----------------------------
   function exportSVG() {
     try {
       const net = networkRef.current;
@@ -1031,12 +1060,10 @@ export default function App() {
         return;
       }
 
-      // Get absolute positions
       const ids = visNodes.getIds() as (string | number)[];
       const pos = net.getPositions(ids as (string | number)[] as string[]);
       const nodeItems = visNodes.get(ids);
 
-      // Bounds
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const id of ids) {
         const p = pos[String(id)];
@@ -1110,107 +1137,82 @@ export default function App() {
     }
   }
 
-  // -----------------------------
-  // Custom Lifecycle: validate + save
-  // -----------------------------
-  function getLifecycleErrors(): string[] {
-    const errs: string[] = [];
+  function exportJSON() {
+    try {
+      const data = snapshot; // ← use the memoized snapshot which includes nodeDescriptions
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `lifecycle_state_${new Date().toISOString().slice(0,10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      markClean();
+    } catch (e) {
+      console.error(e);
+      alert("JSON export failed.");
+    }
+  }
 
-    if (!title.trim()) errs.push("A Title is required.");
-    if (!description.trim()) errs.push("A Description is required.");
-
-    if (!startNodeId) errs.push("The required start node 'Specify needs' was not found.");
-    if (!disposeId) errs.push("The required end node 'Dispose' was not found.");
-    if (!startNodeId || !disposeId) return errs;
-
-    const reachable = bfsReachable(startNodeId, activeEdgeKeys);
-    if (!reachable.has(disposeId)) errs.push("Your path must allow 'Dispose' to be reachable from 'Specify needs'.");
-
-    // terminals = reachable nodes with no outgoing active edges
-    const terminals = Array.from(reachable).filter((nodeId) => {
-      return !Array.from(activeEdgeKeys).some((key) => key.startsWith(nodeId + "->"));
-    });
-    for (const termId of terminals) {
-      const isDispose = termId === disposeId;
-      const isShare = termId === shareId;
-      if (!isDispose && !isShare) {
-        const nodeName = nodeById[termId]?.Name || termId;
-        errs.push(`'${nodeName}' is an endpoint, but only 'Dispose' or 'Share' may end a branch.`);
+  function importJSON(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as AppPersist;
+        const encoded = base64UrlEncode(JSON.stringify(parsed));
+        window.location.hash = `#state=${encoded}`;
+        setLifecycleMode(parsed.lifecycleMode);
+        setTitle(parsed.title || "");
+        setDescription(parsed.description || "");
+        setActiveEdgeKeys(new Set(parsed.activeEdgeKeys || []));
+        setFilterMode(parsed.filterMode ?? null);
+        setSelectedName(parsed.selectedName || "");
+        setSelectedGroup(parsed.selectedGroup || "");
+        setLegendActive(new Set(parsed.legendActive || groups));
+        if (parsed.edgeDescriptions?.length) {
+          const merged = edges.slice();
+          for (const d of parsed.edgeDescriptions) {
+            const idx = merged.findIndex((x) => x.source === d.source && x.target === d.target);
+            if (idx >= 0) merged[idx] = { ...merged[idx], description: d.description ?? merged[idx].description };
+          }
+          setEdges(merged);
+        }
+        markClean();
+      } catch (e) {
+        console.error(e);
+        alert("Invalid JSON file.");
       }
-    }
-
-    // unreachable sources
-    for (const key of activeEdgeKeys) {
-      const [src] = key.split("->");
-      if (!reachable.has(src)) {
-        const srcName = nodeById[src]?.Name || src;
-        errs.push(`Edge from '${srcName}' is active, but '${srcName}' is not reachable from 'Specify needs'.`);
-      }
-    }
-
-    return errs;
+    };
+    reader.readAsText(file);
   }
 
-  function saveLifecycle() {
-    const errs = getLifecycleErrors();
-    if (errs.length > 0) {
-      alert("Cannot save. Please fix the following:\n\n" + errs.join("\n"));
-      return;
+  async function copyShareLink() {
+    try {
+      const encoded = base64UrlEncode(JSON.stringify(snapshot)); // ← includes nodeDescriptions
+      const url = `${location.origin}${location.pathname}${location.search}#state=${encoded}`;
+      await navigator.clipboard.writeText(url);
+      alert("Share link copied to clipboard!");
+      markClean();
+    } catch (e) {
+      console.error(e);
+      alert("Could not copy link. Your browser may block clipboard access.");
     }
+  }
 
-    const nodeIds = Array.from(activeNodeIds);
-    const nodesOut = nodeIds.map((id) => nodeById[id]).filter(Boolean) as NodeRow[];
-
-    const edgesOutRaw: EdgeRow[] = [];
-    for (const key of activeEdgeKeys) {
-      const [src, tgt] = key.split("->");
-      const found = edges.find((e) => e.source === src && e.target === tgt);
-      if (found) edgesOutRaw.push(found);
+  // Helpers: list nodes by family (sorted by name)
+  const nodesByFamily = useMemo(() => {
+    const map = new Map<string, NodeRow[]>();
+    for (const n of nodes) {
+      if (!map.has(n.Family)) map.set(n.Family, []);
+      map.get(n.Family)!.push(n);
     }
+    for (const [, arr] of map) arr.sort((a, b) => a.Name.localeCompare(b.Name));
+    return map;
+  }, [nodes]);
 
-    const edgesOut = edgesOutRaw.map((e, i) => ({
-      id: i + 1,
-      source: e.source,
-      target: e.target,
-      group: nodeById[e.source]?.FamilyID || "",
-      description: e.description || "No description",
-    }));
-
-    const now = new Date();
-    const meta = [
-      ["Title", "Description", "CreatedDate", "CreatedTime"],
-      [title, description, now.toISOString().slice(0, 10), now.toTimeString().slice(0, 8)],
-    ];
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(meta), "Metadata");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(nodesOut), "Nodes");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(edgesOut), "Edges");
-
-    const safeTitle = (title || "CustomLifecycle").replace(/[^a-z0-9]+/gi, "_");
-    XLSX.writeFile(wb, `${safeTitle}_${now.toISOString().slice(0, 10)}.xlsx`);
-
-    markClean();
-  }
-
-  function setEdgeActive(edge: EdgeRow, active: boolean) {
-    const key = `${edge.source}->${edge.target}`;
-    const next = new Set(activeEdgeKeys);
-    if (active) next.add(key);
-    else next.delete(key);
-    setActiveEdgeKeys(next);
-    markDirty();
-  }
-
-  function resetLifecycle() {
-    setLifecycleMode("none");
-    setTitle("");
-    setDescription("");
-    setActiveEdgeKeys(new Set());
-    clearFilters();
-    markDirty();
-  }
-
+  // -----------------------------
+  // LIFECYCLE HELPERS (re-added)
+  // -----------------------------
   function startLifecycleCreate() {
     setLifecycleMode("create");
     setTitle("");
@@ -1270,26 +1272,130 @@ export default function App() {
         if (idx >= 0) merged[idx] = { ...merged[idx], description: imp.description ?? merged[idx].description };
       }
       setEdges(merged);
+      // Adopt definitions from imported Nodes sheet as overrides (optional)
+      const importedNodeDesc: Record<string, string> = {};
+      for (const n of inNodes) {
+        if (n?.NameID && typeof n?.Definition === "string") {
+          importedNodeDesc[n.NameID] = n.Definition;
+        }
+      }
+      setNodeDesc(importedNodeDesc);
       markDirty();
     } catch (err: any) {
       alert("Failed to load lifecycle: " + (err?.message || "Unknown error"));
     }
   }
 
-  // Limit filter options to active subset when in lifecycle mode
-  const filterableNodes = useMemo(
-    () => (lifecycleMode === "none" ? nodes : nodes.filter((n) => activeNodeIds.has(n.NameID))),
-    [nodes, lifecycleMode, activeNodeIds]
-  );
-  const filterableGroups = useMemo(() => Array.from(new Set(filterableNodes.map((n) => n.Family))).sort(), [filterableNodes]);
+  function resetLifecycle() {
+    setLifecycleMode("none");
+    setTitle("");
+    setDescription("");
+    setActiveEdgeKeys(new Set());
+    clearFilters();
+    markDirty();
+  }
 
-  const activeLabelTextClass = isDark ? "text-neutral-100" : "text-gray-800";
+  function getLifecycleErrors(): string[] {
+    const errs: string[] = [];
+
+    if (!title.trim()) errs.push("A Title is required.");
+    if (!description.trim()) errs.push("A Description is required.");
+
+    if (!startNodeId) errs.push("The required start node 'Specify needs' was not found.");
+    if (!disposeId) errs.push("The required end node 'Dispose' was not found.");
+    if (!startNodeId || !disposeId) return errs;
+
+    const reachable = bfsReachable(startNodeId, activeEdgeKeys);
+    if (!reachable.has(disposeId)) errs.push("Your path must allow 'Dispose' to be reachable from 'Specify needs'.");
+
+    // terminals = reachable nodes with no outgoing active edges
+    const terminals = Array.from(reachable).filter((nodeId) => {
+      return !Array.from(activeEdgeKeys).some((key) => key.startsWith(nodeId + "->"));
+    });
+    for (const termId of terminals) {
+      const isDispose = termId === disposeId;
+      const isShare = termId === shareId;
+      if (!isDispose && !isShare) {
+        const nodeName = nodeById[termId]?.Name || termId;
+        errs.push(`'${nodeName}' is an endpoint, but only 'Dispose' or 'Share' may end a branch.`);
+      }
+    }
+
+    // unreachable sources
+    for (const key of activeEdgeKeys) {
+      const [src] = key.split("->");
+      if (!reachable.has(src)) {
+        const srcName = nodeById[src]?.Name || src;
+        errs.push(`Edge from '${srcName}' is active, but '${srcName}' is not reachable from 'Specify needs'.`);
+      }
+    }
+
+    return errs;
+  }
+
+  function saveLifecycle() {
+    const errs = getLifecycleErrors();
+    if (errs.length > 0) {
+      alert("Cannot save. Please fix the following:\n\n" + errs.join("\n"));
+      return;
+    }
+
+    const nodeIds = Array.from(activeNodeIds);
+    const nodesOut = nodeIds
+      .map((id) => {
+        const base = nodeById[id];
+        if (!base) return null;
+        return { ...base, Definition: nodeDesc[id] ?? base.Definition };
+      })
+      .filter(Boolean) as NodeRow[];
+
+    const edgesOutRaw: EdgeRow[] = [];
+    for (const key of activeEdgeKeys) {
+      const [src, tgt] = key.split("->");
+      const found = edges.find((e) => e.source === src && e.target === tgt);
+      if (found) edgesOutRaw.push(found);
+    }
+
+    const edgesOut = edgesOutRaw.map((e, i) => ({
+      id: i + 1,
+      source: e.source,
+      target: e.target,
+      group: nodeById[e.source]?.FamilyID || "",
+      description: e.description || "No description",
+    }));
+
+    const now = new Date();
+    const meta = [
+      ["Title", "Description", "CreatedDate", "CreatedTime"],
+      [title, description, now.toISOString().slice(0, 10), now.toTimeString().slice(0, 8)],
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(meta), "Metadata");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(nodesOut), "Nodes");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(edgesOut), "Edges");
+
+    const safeTitle = (title || "CustomLifecycle").replace(/[^a-z0-9]+/gi, "_");
+    XLSX.writeFile(wb, `${safeTitle}_${now.toISOString().slice(0, 10)}.xlsx`);
+    markClean();
+  }
 
   // -----------------------------
   // AUTOSAVE (debounced) & UNLOAD GUARD
   // -----------------------------
   const snapshot = useMemo<AppPersist>(() => {
-    const edgeDescriptions = edges.map(e => ({ source: e.source, target: e.target, description: e.description }));
+    const edgeDescriptions = edges.map(e => ({
+      source: e.source,
+      target: e.target,
+      description: e.description,
+    }));
+
+    // NEW: include node description overrides in the persisted shape
+    const nodeDescriptions = Object.entries(nodeDesc).map(([NameID, Definition]) => ({
+      NameID,
+      Definition,
+    }));
+
     return {
       lifecycleMode,
       title,
@@ -1300,9 +1406,20 @@ export default function App() {
       selectedGroup,
       legendActive: Array.from(legendActive),
       edgeDescriptions,
+      nodeDescriptions,
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lifecycleMode, title, description, activeEdgeKeys, filterMode, selectedName, selectedGroup, legendActive, edges]);
+  }, [
+    lifecycleMode,
+    title,
+    description,
+    activeEdgeKeys,
+    filterMode,
+    selectedName,
+    selectedGroup,
+    legendActive,
+    edges,
+    nodeDesc,
+  ]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -1326,76 +1443,20 @@ export default function App() {
   }, [dirty]);
 
   // -----------------------------
-  // Export / Import JSON & Share Link
-  // -----------------------------
-  function exportJSON() {
-    try {
-      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `lifecycle_state_${new Date().toISOString().slice(0,10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      markClean();
-    } catch (e) {
-      console.error(e);
-      alert("JSON export failed.");
-    }
-  }
-
-  function importJSON(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result)) as AppPersist;
-        const encoded = base64UrlEncode(JSON.stringify(parsed));
-        window.location.hash = `#state=${encoded}`;
-        setLifecycleMode(parsed.lifecycleMode);
-        setTitle(parsed.title || "");
-        setDescription(parsed.description || "");
-        setActiveEdgeKeys(new Set(parsed.activeEdgeKeys || []));
-        setFilterMode(parsed.filterMode ?? null);
-        setSelectedName(parsed.selectedName || "");
-        setSelectedGroup(parsed.selectedGroup || "");
-        setLegendActive(new Set(parsed.legendActive || groups));
-        if (parsed.edgeDescriptions?.length) {
-          const merged = edges.slice();
-          for (const d of parsed.edgeDescriptions) {
-            const idx = merged.findIndex((x) => x.source === d.source && x.target === d.target);
-            if (idx >= 0) merged[idx] = { ...merged[idx], description: d.description ?? merged[idx].description };
-          }
-          setEdges(merged);
-        }
-        markClean();
-      } catch (e) {
-        console.error(e);
-        alert("Invalid JSON file.");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  async function copyShareLink() {
-    try {
-      const encoded = base64UrlEncode(JSON.stringify(snapshot));
-      const url = `${location.origin}${location.pathname}${location.search}#state=${encoded}`;
-      await navigator.clipboard.writeText(url);
-      alert("Share link copied to clipboard!");
-      markClean();
-    } catch (e) {
-      console.error(e);
-      alert("Could not copy link. Your browser may block clipboard access.");
-    }
-  }
-
-  // -----------------------------
   // Render
   // -----------------------------
+    // -----------------------------
+  // Render
+  // -----------------------------
+  const activeLabelTextClass = isDark ? "text-neutral-100" : "text-gray-800";
+
   return (
-    <div className="min-h-screen grid grid-cols-1 lg:grid-cols-[360px_1fr]">
+    <div className="h-screen grid grid-cols-1 lg:grid-cols-[360px_1fr] min-h-0">
       {/* Left Pane */}
-      <aside className={`border-r ${ui.asideBg} backdrop-blur p-4 flex flex-col gap-4`}>
+      <aside
+        className={`border-r ${ui.asideBg} backdrop-blur p-4 flex flex-col gap-4 min-h-0`}
+        style={{ contain: "paint" }}
+      >
         {/* Centered title + two sibling buttons */}
         <div className="mb-3 flex flex-col items-center gap-3">
           <h2 className="text-lg font-semibold text-center">
@@ -1405,10 +1466,20 @@ export default function App() {
           {lifecycleMode === "none" ? (
             <>
               <div className="flex items-center justify-center gap-3">
-                <button onClick={startLifecycleCreate} className={`px-3 py-1.5 ${ui.btnPill}`}>
+                <button
+                  onClick={startLifecycleCreate}
+                  className={`px-3 py-1.5 ${ui.btnPill}`}
+                  title="Start a new lifecycle from scratch"
+                  aria-label="Start Custom Lifecycle"
+                >
                   Start Custom Lifecycle
                 </button>
-                <button onClick={() => fileInputRef.current?.click()} className={`px-3 py-1.5 ${ui.btnPill}`}>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`px-3 py-1.5 ${ui.btnPill}`}
+                  title="Load and edit a lifecycle from an .xlsx file"
+                  aria-label="Edit Custom Lifecycle"
+                >
                   Edit Custom Lifecycle
                 </button>
               </div>
@@ -1429,14 +1500,20 @@ export default function App() {
                 const lose = confirm("Cancel Custom Lifecycle? Unsaved progress will be lost.");
                 if (lose) resetLifecycle();
               }}
+              title="Cancel and discard current lifecycle changes"
+              aria-label="Cancel Custom Lifecycle"
             >
               Cancel Custom Lifecycle
             </button>
           )}
         </div>
 
-        {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto pr-1">
+        {/* Scrollable content (independent of footer) */}
+        <div
+          ref={leftPaneRef}
+          className="flex-1 min-h-0 overflow-y-auto pr-1 pb-28 overscroll-contain will-change-scroll [transform:translateZ(0)]"
+          style={{ scrollbarGutter: "stable both-edges", contain: "layout paint size" }}
+        >
           {lifecycleMode !== "none" && (
             <div className="space-y-3">
               <p className={isDark ? "text-sm text-neutral-300" : "text-sm text-gray-600"}>
@@ -1462,8 +1539,42 @@ export default function App() {
 
               {/* Grouped, collapsible editor */}
               <div className="mt-2">
-                {filterableGroups.map((fam) => (
-                  <details key={fam} className={isDark ? "border border-neutral-700 rounded-md mb-2 bg-neutral-900 shadow-sm" : "border rounded-md mb-2 bg-white shadow-sm"} open>
+                <div className="mb-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  className={`px-2 py-1 text-xs ${ui.btnPill}`}
+                  onClick={() => {
+                    const all: Record<string, boolean> = {};
+                    groups.forEach(g => { all[g] = true; });
+                    setOpenFamilies(all);
+                  }}
+                >
+                  Expand all
+                </button>
+                <button
+                  type="button"
+                  className={`px-2 py-1 text-xs ${ui.btnPill}`}
+                  onClick={() => {
+                    const all: Record<string, boolean> = {};
+                    groups.forEach(g => { all[g] = false; });
+                    setOpenFamilies(all);
+                  }}
+                >
+                  Collapse all
+                </button>
+              </div>
+                {groups.map((fam) => (
+                  <details
+                    key={fam}
+                    className={(isDark
+                      ? "border border-neutral-700 rounded-md mb-2 bg-neutral-900 shadow-sm"
+                      : "border rounded-md mb-2 bg-white shadow-sm") + " contain-paint"}
+                    open={openFamilies[fam] ?? true}
+                    onToggle={(e) => {
+                      const open = (e.currentTarget as HTMLDetailsElement).open;
+                      setOpenFamilies(prev => ({ ...prev, [fam]: open }));
+                    }}
+                  >
                     <summary className={isDark ? "px-3 py-2 cursor-pointer bg-neutral-800 font-medium text-sm flex items-center justify-between" : "px-3 py-2 cursor-pointer bg-gray-100 font-medium text-sm flex items-center justify-between"}>
                       <span>{fam}</span>
                     </summary>
@@ -1477,8 +1588,10 @@ export default function App() {
                           return (
                             <details
                               key={n.NameID}
-                              className={`border rounded-md shadow-sm ${
-                                isNodeActive ? (isDark ? "bg-neutral-900 border-neutral-700" : "bg-white") : (isDark ? "bg-neutral-900/70 border-neutral-700 opacity-60" : "bg-gray-50 opacity-60")
+                              ref={(el) => { nodeDetailsRefs.current[n.NameID] = el; }}
+                              className={`border rounded-md shadow-sm will-change-transform [transform:translateZ(0)] ${ 
+                                isNodeActive ? (isDark ? "bg-neutral-900 border-neutral-700" : "bg-white")
+                                            : (isDark ? "bg-neutral-900/70 border-neutral-700 opacity-60" : "bg-gray-50 opacity-60")
                               }`}
                               open={n.NameID === startNodeId}
                             >
@@ -1502,23 +1615,34 @@ export default function App() {
                                   <textarea
                                     disabled={!isNodeActive}
                                     className={`${ui.input} disabled:bg-opacity-60`}
-                                    defaultValue={n.Definition}
-                                    onChange={markDirty}
+                                    value={nodeDesc[n.NameID] ?? n.Definition}
+                                    onChange={(ev) => {
+                                      const v = ev.target.value;
+                                      setNodeDesc(prev => ({ ...prev, [n.NameID]: v }));
+                                      markDirty();
+                                    }}
                                   />
                                 </div>
 
-                                {/* Outgoing edges */}
-                                <div className="space-y-2">
-                                  <div className={isDark ? "text-xs font-semibold text-neutral-200" : "text-xs font-semibold text-gray-700"}>
+                                {/* Outgoing edges (independent scroller) */}
+                                <div
+                                  className="space-y-2 max-h-[45vh] overflow-y-auto pr-1 overscroll-contain will-change-scroll [transform:translateZ(0)]"
+                                  style={{ contain: "layout paint size", minHeight: 160 }}
+                                >
+                                  <div className={isDark ? "text-xs font-semibold text-neutral-200" : "text-xs font-semibold text-gray-700"} title="Activate edges this node can take; destinations become part of the kept view.">
                                     Outgoing edges
                                   </div>
+                                  { (outgoingBySource.get(n.NameID) ?? []).length === 0 && (
+                                    <div className={isDark ? "text-xs text-neutral-400" : "text-xs text-gray-500"}>
+                                      No outgoing edges defined for this node.
+                                    </div>
+                                  )}
 
                                   {(outgoingBySource.get(n.NameID) || []).map((e) => {
                                     const key = `${e.source}->${e.target}`;
                                     const isEdgeOn = activeEdgeKeys.has(key);
                                     const targetName = nodeById[e.target]?.Name || e.target;
 
-                                    // only toggle edges from active nodes
                                     const canEditThisEdge = n.NameID === startNodeId || activeNodeIds.has(n.NameID);
 
                                     return (
@@ -1533,9 +1657,16 @@ export default function App() {
                                         <label className="flex items-center gap-2">
                                           <input
                                             type="checkbox"
+                                            className="h-4 w-4 accent-emerald-600 shrink-0"
                                             disabled={!canEditThisEdge}
                                             checked={isEdgeOn}
-                                            onChange={(ev) => setEdgeActive(e, ev.target.checked)}
+                                            onChange={(ev) => {
+                                              const next = new Set(activeEdgeKeys);
+                                              if (ev.target.checked) next.add(key);
+                                              else next.delete(key);
+                                              setActiveEdgeKeys(next);
+                                              markDirty();
+                                            }}
                                           />
                                           <span className="text-sm">
                                             {n.Name} → {targetName}
@@ -1580,6 +1711,8 @@ export default function App() {
           <div className={`mt-3 pt-3 border-t ${ui.divider} flex items-center gap-2`}>
             <button
               className={`px-3 py-1.5 ${ui.btnPill}`}
+              title="Run checks to ensure your lifecycle is valid"
+              aria-label="Validate lifecycle"
               onClick={() => {
                 const errs = getLifecycleErrors();
                 if (errs.length === 0) {
@@ -1595,6 +1728,8 @@ export default function App() {
               className={`px-3 py-1.5 ${ui.btnPill} disabled:opacity-50`}
               disabled={getLifecycleErrors().length > 0}
               onClick={saveLifecycle}
+              title="Save this lifecycle to an .xlsx workbook"
+              aria-label="Save lifecycle to XLSX"
             >
               Save Lifecycle (XLSX)
             </button>
@@ -1609,13 +1744,13 @@ export default function App() {
           <div className={ui.panelTitle}>Export</div>
           <div className="flex flex-col gap-2">
             <div className="flex gap-2">
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportPNG}>PNG</button>
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportSVG}>SVG</button>
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportJSON}>JSON</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportPNG} title="Export the current graph as a PNG image" aria-label="Export PNG">PNG</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportSVG} title="Export the current graph as an SVG file" aria-label="Export SVG">SVG</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportJSON} title="Export current app state (filters, lifecycle, descriptions) as JSON" aria-label="Export JSON">JSON</button>
             </div>
             <div className="flex gap-2">
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={copyShareLink}>Copy Share Link</button>
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={() => importJsonRef.current?.click()}>Import JSON</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={copyShareLink} title="Copy a shareable URL that restores this exact view" aria-label="Copy share link">Copy Share Link</button>
+              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={() => importJsonRef.current?.click()} title="Import a previously exported JSON state file" aria-label="Import JSON">Import JSON</button>
               <input
                 ref={importJsonRef}
                 className="hidden"
@@ -1644,7 +1779,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Zoom (bottom-right) as horizontal: +  -  Fit */}
+        {/* Zoom (bottom-right) */}
         <div className={`absolute bottom-3 right-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
           <div className={ui.panelTitle}>Zoom</div>
           <div className="flex items-center gap-2">
@@ -1655,7 +1790,7 @@ export default function App() {
         </div>
 
         {/* Filters (top-right) */}
-        <div className="absolute top-3 right-3 z-10 flex flex-col gap-3 w-[min(210px,calc(100vw-48px))]">
+        <div className="absolute top-3 right-3 z-10 flex flex-col gap-3 w-[min(220px,calc(100vw-48px))]">
           {activeFilterLabel && (
             <div className={`rounded-lg p-2 shadow ${ui.panel}`}>
               <div className={`text-[10px] font-semibold leading-tight break-words max-h-32 overflow-y-auto ${activeLabelTextClass}`}>
@@ -1664,7 +1799,7 @@ export default function App() {
             </div>
           )}
 
-          <div className={`rounded-lg p-3 shadow ${ui.panel}`}>
+          <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Filter the graph by a single node (keeps its outgoing edges and destinations).">
             <div className={ui.panelTitle}>Select by Name</div>
             <select
               className={ui.input}
@@ -1675,7 +1810,7 @@ export default function App() {
               }}
             >
               <option value="">—</option>
-              {filterableNodes.map((n) => (
+              {(lifecycleMode === "none" ? nodes : nodes.filter(n => activeNodeIds.has(n.NameID))).map((n) => (
                 <option key={n.NameID} value={n.Name}>
                   {n.Name}
                 </option>
@@ -1683,7 +1818,7 @@ export default function App() {
             </select>
           </div>
 
-          <div className={`rounded-lg p-3 shadow ${ui.panel}`}>
+          <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Filter the graph by group/family (keeps group nodes, their outgoing edges, and the destination nodes).">
             <div className={ui.panelTitle}>Select by Group</div>
             <select
               className={ui.input}
@@ -1695,7 +1830,10 @@ export default function App() {
               }}
             >
               <option value="">—</option>
-              {filterableGroups.map((g) => (
+              {(lifecycleMode === "none"
+                ? groups
+                : Array.from(new Set(nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => n.Family))).sort()
+              ).map((g) => (
                 <option key={g} value={g}>
                   {g}
                 </option>
@@ -1703,32 +1841,77 @@ export default function App() {
             </select>
           </div>
 
-          <div className={`rounded-lg p-3 shadow ${ui.panel}`}>
+          <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Legend — click a family to filter (same as Select by Group).">
             <div className={ui.panelTitle}>Legend</div>
-            <div className="flex flex-wrap gap-2">
-              {filterableGroups.map((fam) => {
-                const active = filterMode === "legend" ? legendActive.has(fam) : true;
+            <div className="flex flex-wrap gap-2 justify-center">
+              {(
+                lifecycleMode === "none"
+                  ? groups
+                  : Array.from(new Set(nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => n.Family))).sort()
+              ).map((fam) => {
+                // active if the current group filter equals this family
+                const active = filterMode === "group" && selectedGroup === fam;
                 return (
                   <button
                     key={fam}
                     onClick={() => toggleLegendFamily(fam)}
-                    className={`px-2 py-1 rounded-full text-sm ${active ? ui.chipActive : ui.chipInactive}`}
+                    className={`${ui.chipBase} ${active ? ui.chipActive : ui.chipInactive}`}
+                    title={`Filter by ${fam}`}
+                    aria-label={`Filter by ${fam}`}
                   >
                     {fam}
                   </button>
                 );
               })}
-            </div>
-            <div className="mt-3">
-              <button className={`px-3 py-1.5 ${ui.btnPill}`} onClick={clearFilters}>
+
+              <button
+                onClick={clearFilters}
+                className={`${ui.chipBase} ${ui.chipActive}`}
+                title="Clear all filters and restore defaults"
+                aria-label="Clear filters"
+              >
                 Clear Filters
               </button>
             </div>
           </div>
         </div>
 
+        {/* Family Boxes (left-middle) */}
+        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-0 w-[260px] max-h-[70vh] overflow-y-auto space-y-3 pointer-events-none">
+          {groups.map((fam) => {
+            const meta = FAMILY_META[fam] || { main: fam.toLowerCase(), three: "" };
+            const colors = makeColorForFamily(fam);
+            const names = (nodesByFamily.get(fam) || []).map(n => n.Name);
+            return (
+              <div
+                key={fam}
+                className="rounded-lg p-3 border-2 shadow-sm pointer-events-auto"
+                style={{
+                  background: colors.background,
+                  borderColor: colors.border,
+                }}
+              >
+                <div className="text-sm font-semibold" style={{ color: "#111" }}>
+                  {meta.main}
+                </div>
+                <div className="text-xs mb-2" style={{ color: "#111" }}>
+                  {meta.three}
+                </div>
+                <div
+                  className="border-t-4 mb-2"
+                  style={{ borderColor: colors.border }}
+                />
+                <div className="text-xs leading-snug" style={{ color: "#111" }}>
+                  {names.length ? names.join(", ") : "—"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
         {/* Graph canvas */}
         <div ref={containerRef} className="w-full h-[calc(100vh-0px)]" />
+
       </section>
     </div>
   );
@@ -1739,15 +1922,21 @@ function HoldButton({
   className,
   onHold,
   children,
+  title,
+  ariaLabel,
 }: {
   className?: string;
   onHold: () => void;
   children: any;
+  title?: string;
+  ariaLabel?: string;
 }) {
   return (
     <button
       className={className}
-      onMouseDown={() => onHold()}   // beginHold is called in the handler passed in
+      title={title}
+      aria-label={ariaLabel || title}
+      onMouseDown={() => onHold()}
       onMouseUp={() => stopHold()}
       onMouseLeave={() => stopHold()}
       onTouchStart={() => onHold()}
