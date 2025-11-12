@@ -14,6 +14,10 @@ import { DataSet } from "vis-data";
  *   npm install papaparse vis-network xlsx
  *
  * Place CSVs in /public: nodes_final.csv, edges_final.csv
+ *
+ * For examples (Option B): put .xlsx files under src/examples/
+ *   - They will be discovered via import.meta.glob and bundled.
+ *   - No need to place them in public/ for the dropdown to work.
  */
 
 // -----------------------------
@@ -252,59 +256,99 @@ async function fetchCsv<T extends Record<string, any> = Record<string, any>>(url
   return (parsed.data ?? []).filter((row) => row && typeof row === "object" && Object.keys(row as object).length > 0);
 }
 
-// ----- Family palette (matches your legend) -----
+// --- Fixed family tiers (your requested scheme) ---
+type Tier = "dark" | "mid" | "soft";
+const FAMILY_TIER: Record<string, Tier> = {
+  INITIATION: "dark",
+  ACQUISITION: "mid",
+  LEVERAGING: "soft",
+  CONFIGURATION: "dark",
+  PROCESSING: "soft",
+  DISPOSITION: "mid",
+
+  // long display names map to same family
+  "Plan, design & enable": "dark",
+  "Create, Capture & Collect": "mid",
+  "Access, use & share": "soft",
+  "Organize, store & maintain": "dark",
+  "Provision, integrate & Curate": "soft",
+  "Archive transfer & destroy": "mid",
+};
+
+// --- Stable, CVD-friendly base hues per family (distinct around wheel) ---
+const BASE_HUES: Record<string, number> = {
+  INITIATION: 30,   // amber
+  ACQUISITION: 210, // blue
+  LEVERAGING: 305,  // magenta
+  CONFIGURATION: 15,// orange
+  PROCESSING: 95,  // green
+  DISPOSITION: 265, // violet
+
+  "Plan, design & enable": 30,
+  "Create, Capture & Collect": 210,
+  "Access, use & share": 285,
+  "Organize, store & maintain": 15,
+  "Provision, integrate & Curate": 95,
+  "Archive transfer & destroy": 265,
+};
+
+// === Family canonicalization ===
+const FAMILY_CANON: Record<string, string> = {
+  // one-word already canonical
+  INITIATION: "INITIATION",
+  ACQUISITION: "ACQUISITION",
+  LEVERAGING: "LEVERAGING",
+  CONFIGURATION: "CONFIGURATION",
+  PROCESSING: "PROCESSING",
+  DISPOSITION: "DISPOSITION",
+
+  // 3-word forms → one-word
+  "Plan, design & enable": "INITIATION",
+  "Create, Capture & Collect": "ACQUISITION",
+  "Access, use & share": "LEVERAGING",
+  "Organize, store & maintain": "CONFIGURATION",
+  "Provision, integrate & Curate": "PROCESSING",
+  "Archive transfer & destroy": "DISPOSITION",
+};
+
+function canonFam(f: string): string {
+  if (!f) return f;
+  return FAMILY_CANON[f] ?? FAMILY_CANON[f.trim()] ?? f;
+}
+
+function hsl(h:number, s:number, l:number) { return `hsl(${h} ${s}% ${l}%)`; }
+
+// Given a tier, pick accessible lightness & slightly darker border
+function shadeFor(hue:number, tier:Tier) {
+  // moderate saturation keeps separability under CVD
+  const sat = 62;
+  const L = tier === "dark" ? 38 : tier === "mid" ? 58 : 85;   // background
+  const bg = hsl(hue, sat, L);
+  const border = hsl(hue, Math.min(82, sat + 10), Math.max(22, L - 20));
+  const hiBg = hsl(hue, Math.min(80, sat + 6), Math.min(92, L + 8));
+  const hiBorder = hsl(hue, Math.min(88, sat + 16), Math.max(18, L - 26));
+  return { bg, border, hiBg, hiBorder };
+}
+
+// 🔁 DROP-IN REPLACEMENT for makeColorForFamily
 function makeColorForFamily(
   family: string
 ): { border: string; background: string; highlight: { border: string; background: string } } {
-  const PALETTE: Record<string, { bg: string; border: string; hiBg?: string; hiBorder?: string }> = {
-    INITIATION: { bg: "#A7C6ED", border: "#3B82F6" },
-    ACQUISITION: { bg: "#FFE866", border: "#F59E0B" },
-    CONFIGURATION: { bg: "#FF9AA2", border: "#DC2626" },
-    PROCESSING: { bg: "#A7E07A", border: "#16A34A" },
-    LEVERAGING: { bg: "#F1A7FF", border: "#A21CAF" },
-    DISPOSITION: { bg: "#C4B5FD", border: "#7C3AED" },
-
-    // Long display names (if your CSV uses these)
-    "Plan, design & enable": { bg: "#A7C6ED", border: "#3B82F6" },
-    "Archive transfer & destroy": { bg: "#C4B5FD", border: "#7C3AED" },
-    "Create, Capture & Collect": { bg: "#FFE866", border: "#F59E0B" },
-    "Organize, store & maintain": { bg: "#FF9AA2", border: "#DC2626" },
-    "Provision, integrate & Curate": { bg: "#A7E07A", border: "#16A34A" },
-    "Access, use & share": { bg: "#F1A7FF", border: "#A21CAF" },
-  };
-
-  const defined = PALETTE[family];
-  if (defined) {
-    return {
-      border: defined.border,
-      background: defined.bg,
-      highlight: {
-        border: defined.hiBorder ?? defined.border,
-        background: defined.hiBg ?? defined.bg,
-      },
-    };
-  }
-
-  // Fallback deterministic pastel
-  let h = 0;
-  for (let i = 0; i < family.length; i++) h = (h * 31 + family.charCodeAt(i)) >>> 0;
-  const hue = h % 360;
-  const sat = 55, light = 72;
-  const color = `hsl(${hue} ${sat}% ${light}%)`;
-  const border = `hsl(${hue} ${sat + 10}% ${Math.max(35, light - 25)}%)`;
-  const hiBg = `hsl(${hue} ${sat + 5}% ${Math.min(92, light + 15)}%)`;
-  const hiBorder = `hsl(${hue} ${sat + 15}% ${Math.max(30, light - 30)}%)`;
-  return { border, background: color, highlight: { border: hiBorder, background: hiBg } };
+  const canonical = canonFam(family);
+  const hue = BASE_HUES[canonical] ?? 200;                   // fallback hue
+  const tier: Tier = FAMILY_TIER[canonical] ?? "mid";        // fallback tier
+  const { bg, border, hiBg, hiBorder } = shadeFor(hue, tier);
+  return { border, background: bg, highlight: { border: hiBorder, background: hiBg } };
 }
 
 // 3-word associations per family
-const FAMILY_META: Record<string, { main: string; three: string }> = {
-  INITIATION: { main: "initiation", three: "plan, design & enable" },
-  ACQUISITION: { main: "acquisition", three: "create, capture & collect" },
-  CONFIGURATION: { main: "configuration", three: "organize, store & maintain" },
-  PROCESSING: { main: "processing", three: "provision, integrate & curate" },
-  LEVERAGING: { main: "leveraging", three: "access, use & share" },
-  DISPOSITION: { main: "disposition", three: "archive, transfer & destroy" },
+const FAMILY_META: Record<string, { main: string }> = {
+  INITIATION: { main: "INITIATION" },
+  ACQUISITION: { main: "ACQUISITION" },
+  CONFIGURATION: { main: "CONFIGURATION" },
+  PROCESSING:   { main: "PROCESSING" },
+  LEVERAGING:   { main: "LEVERAGING" },
+  DISPOSITION:  { main: "DISPOSITION" },
 };
 
 // -----------------------------
@@ -429,8 +473,10 @@ function buildVisDatasets(
 
   const visNodes = new DataSet<VisNode>(
     nodes.map((n) => {
-      if (!famCache[n.Family]) famCache[n.Family] = makeColorForFamily(n.Family);
-      const c = famCache[n.Family];
+      const famC = canonFam(n.Family);
+      if (!famCache[famC]) famCache[famC] = makeColorForFamily(famC);
+      const c = famCache[famC];
+
       const isActive = options.activeNodeIds ? options.activeNodeIds.has(n.NameID) : true;
       const pos = options.positions?.[n.NameID];
       const size = Math.min(24, Math.max(12, Number(n.size ?? 16)));
@@ -439,7 +485,7 @@ function buildVisDatasets(
         id: n.NameID,
         label: padLabel(n.Name),
         title: n.Definition || n.Name,
-        group: n.Family,
+        group: famC,
         shape: "dot",
         size,
         font: {
@@ -471,7 +517,7 @@ function buildVisDatasets(
     edges.map((e) => {
       const src = nodeMapById[e.source];
       const familyColor = src
-        ? makeColorForFamily(src.Family)
+        ? makeColorForFamily(canonFam(src.Family))
         : { border: "#1f2937", highlight: { border: "#1f2937", background: "#1f2937" } };
       const pk = pairKey(e.source, e.target);
 
@@ -483,7 +529,7 @@ function buildVisDatasets(
         smooth: { enabled: false } as any,
         width: 1.5,
         color: { color: familyColor.border, highlight: familyColor.highlight.border },
-        title: options.showEdgeTooltips ? (tipLines.get(pk) || []).join("\n") : undefined,
+        title: options.showEdgeTooltips ? (tipLines.get(pk) || []).sort().join("\n") : undefined,
       };
 
       edge.__origColor = edge.color;
@@ -539,6 +585,13 @@ function stopHold() {
 // ✅ Pan step (kept at 2)
 const PAN_STEP = 2;
 
+// =================== OPTION B: Bundled examples ===================
+// If you put .xlsx files in src/examples/, Vite/ESBuild will bundle them.
+// This glob creates a map like { '/src/examples/1__Foo.xlsx': 'blob-or-asset-url', ... }
+const VITE_EXAMPLES: Record<string, string> =
+  // @ts-ignore - vite-specific import
+  (import.meta as any).glob?.("/src/examples/*.xlsx", { eager: true, as: "url" }) ?? {};
+
 // -----------------------------
 // Main Component
 // -----------------------------
@@ -563,14 +616,22 @@ export default function App() {
   // Mappings
   const nodeById = useMemo(() => Object.fromEntries(nodes.map((n) => [n.NameID, n])), [nodes]);
   const nameToId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.Name.toLowerCase(), n.NameID])), [nodes]);
-  const groups = useMemo(() => Array.from(new Set(nodes.map((n) => n.Family))).sort(), [nodes]);
-  
+  const groups = useMemo(
+    () => Array.from(new Set(nodes.map((n) => canonFam(n.Family)))).sort(),
+    [nodes]
+  );
 
   // Graph
   const containerRef = useRef<HTMLDivElement | null>(null);
   const networkRef = useRef<Network | null>(null);
   const visNodesRef = useRef<DataSet<VisNode> | null>(null);
   const visEdgesRef = useRef<DataSet<VisEdge> | null>(null);
+
+  // viewport persistence
+  const initialFitDoneRef = useRef(false); // only auto-fit once
+  const hasInteractedRef = useRef(false);  // user panned/zoomed
+  const viewRef = useRef<{ position: { x: number; y: number }; scale: number } | null>(null);
+
 
   // File inputs
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -633,13 +694,113 @@ export default function App() {
           fetchCsv<NodeRow>(`${base}nodes_final.csv`),
           fetchCsv<EdgeRow>(`${base}edges_final.csv`),
         ]);
-        setNodes(n);
+        setNodes(n.map(row => ({ ...row, Family: canonFam(row.Family) })));
         setEdges(e);
       } catch (err) {
         console.error(err);
       }
     })();
   }, [base]);
+
+  // Dynamic discovery of Examples (Option B first, then public/)
+  type ExampleEntry = { name: string; url: string };
+
+  const [exampleFiles, setExampleFiles] = useState<ExampleEntry[]>([]);
+  const [selectedExample, setSelectedExample] = useState<string>("");
+
+  // Prefer bundled (Option B): import.meta.glob URLs → ExampleEntry[]
+  function discoverExamplesFromBundle(): ExampleEntry[] {
+    const entries: ExampleEntry[] = [];
+    for (const fullPath in VITE_EXAMPLES) {
+      // fullPath like '/src/examples/1__Existant_HR...xlsx'
+      const url = (VITE_EXAMPLES as any)[fullPath] as string;
+      const name = fullPath.split("/").pop() || fullPath;
+      entries.push({ name, url });
+    }
+    // Natural sort by leading number if present
+    entries.sort((a, b) => {
+      const na = parseInt(a.name, 10);
+      const nb = parseInt(b.name, 10);
+      if (!Number.isNaN(na) && !Number.isNaN(nb) && na !== nb) return na - nb;
+      return a.name.localeCompare(b.name);
+    });
+    return entries;
+  }
+
+  // Try manifest.json in /public/examples, otherwise directory listing
+  async function discoverExamplesViaPublic(baseUrl: string): Promise<ExampleEntry[]> {
+    // 1) manifest.json
+    try {
+      const mres = await fetch(`${baseUrl}examples/manifest.json`, { cache: "no-store" });
+      if (mres.ok) {
+        const list: string[] = await mres.json();
+        return list
+          .filter(f => f.toLowerCase().endsWith(".xlsx"))
+          .map(f => ({ name: f, url: `${baseUrl}examples/${encodeURIComponent(f)}` }));
+      }
+    } catch { /* ignore */ }
+
+    // 2) Directory index fallback
+    try {
+      const ires = await fetch(`${baseUrl}examples/`, { cache: "no-store" });
+      if (ires.ok) {
+        const html = await ires.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const anchors = Array.from(doc.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+        const files = anchors
+          .map(a => decodeURIComponent(a.getAttribute("href") || ""))
+          .map(href => href.replace(/^\.\//, ""))
+          .filter(href => href.toLowerCase().endsWith(".xlsx"));
+        const uniq = Array.from(new Set(files));
+        return uniq.map(f => ({ name: f, url: `${baseUrl}examples/${encodeURIComponent(f)}` }));
+      }
+    } catch { /* ignore */ }
+
+    return [];
+  }
+
+  // Probe on mount for examples
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // 1) Option B (bundled src/examples)
+      const bundled = discoverExamplesFromBundle();
+      if (bundled.length) {
+        if (!cancelled) {
+          setExampleFiles(bundled);
+          setSelectedExample(bundled[0]?.name || "");
+        }
+        return;
+      }
+      // 2) Otherwise public/ flow
+      const found = await discoverExamplesViaPublic(base);
+      if (!cancelled) {
+        found.sort((a, b) => {
+          const na = parseInt(a.name, 10);
+          const nb = parseInt(b.name, 10);
+          if (!Number.isNaN(na) && !Number.isNaN(nb) && na !== nb) return na - nb;
+          return a.name.localeCompare(b.name);
+        });
+        setExampleFiles(found);
+        if (found.length) setSelectedExample(found[0].name);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [base]);
+
+  async function loadExampleByName(fname: string) {
+    // First, try bundled map
+    const bundled = exampleFiles.find(e => e.name === fname);
+    if (!bundled) return;
+    const res = await fetch(bundled.url, { cache: "no-store" });
+    if (!res.ok) {
+      alert(`Could not load example: ${fname}`);
+      return;
+    }
+    const ab = await res.arrayBuffer();
+    const file = new File([ab], fname, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    await handleLifecycleLoad(file);
+  }
 
   // Hydrate from URL hash or localStorage after data is ready
   useEffect(() => {
@@ -708,7 +869,6 @@ export default function App() {
       ? nodes
       : nodes.filter(n => activeNodeIds.has(n.NameID));
 
-    
     const baseEdges = lifecycleMode === "none"
       ? edges
       : edges.filter(e => activeEdgeKeys.has(`${e.source}->${e.target}`));
@@ -737,6 +897,18 @@ export default function App() {
         color: (e as any).__origColor ?? (e as any).color,
         width: (e as any).__origWidth ?? (e as any).width,
       });
+    }
+
+    // preserve previous view if we already had a network
+    if (networkRef.current) {
+      try {
+        const prev = networkRef.current;
+        const pos = prev.getViewPosition?.();
+        const scale = prev.getScale?.();
+        if (pos && typeof scale === "number") {
+          viewRef.current = { position: pos, scale };
+        }
+      } catch {}
     }
 
     // Create network
@@ -780,6 +952,7 @@ export default function App() {
       const el = document.createElement("div");
       el.className =
         "pointer-events-none fixed z-[9999] px-2 py-1 text-xs rounded bg-black text-white shadow";
+      el.style.whiteSpace = "pre-line";
       el.textContent = text;
       tipElRef.current = el;
       document.body.appendChild(el);
@@ -818,6 +991,20 @@ export default function App() {
     net.on("zoom", hideTip);
     net.on("dragEnd", hideTip);
 
+    net.on("dragStart", () => { hasInteractedRef.current = true; });
+    net.on("zoom", () => { hasInteractedRef.current = true; });
+
+    // also keep viewRef fresh while user moves
+    net.on("dragEnd", () => {
+      try {
+        const pos = net.getViewPosition?.();
+        const scale = net.getScale?.();
+        if (pos && typeof scale === "number") {
+          viewRef.current = { position: pos, scale };
+        }
+      } catch {}
+    });
+
     net.setOptions({
       nodes: { labelHighlightBold: true },
       interaction: { hover: true, tooltipDelay: 0 }
@@ -827,11 +1014,26 @@ export default function App() {
     applyAntiPierce(visEdges, positions);
     net.redraw();
 
-    // Frame it
-    setTimeout(() => net.fit({ animation: { duration: 450, easingFunction: "easeInOutQuad" } }), 30);
+    if (!initialFitDoneRef.current) {
+      initialFitDoneRef.current = true;
+      net.fit({ animation: { duration: 450, easingFunction: "easeInOutQuad" } });
+    } else if (viewRef.current) {
+      const { position, scale } = viewRef.current;
+      net.moveTo({ position, scale, animation: { duration: 0, easingFunction: "easeInOutQuad" } });
+    }
 
     networkRef.current = net;
     return () => {
+      try {
+        if (networkRef.current) {
+          const pos = networkRef.current.getViewPosition?.();
+          const scale = networkRef.current.getScale?.();
+          if (pos && typeof scale === "number") {
+            viewRef.current = { position: pos, scale };
+          }
+        }
+      } catch {}
+
       hideTip();
       net.destroy();
       networkRef.current = null;
@@ -845,19 +1047,13 @@ export default function App() {
     if (!node) return;
     const fam = node.Family;
 
-    // Open the <details> for this family
     setOpenFamilies(prev => ({ ...prev, [fam]: true }));
 
-    // Defer to next paint so the <details> renders before measuring
     requestAnimationFrame(() => {
       const el = nodeDetailsRefs.current[nodeId];
       const scroller = leftPaneRef.current;
       if (!el || !scroller) return;
-
-      // Smoothly bring the node card into view within the left scroller
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-
-      // Brief highlight to help the eye
       el.classList.add("outline-2", "outline-emerald-500", "outline");
       setTimeout(() => el.classList.remove("outline-2", "outline-emerald-500", "outline"), 900);
     });
@@ -893,7 +1089,6 @@ export default function App() {
     const id = nameToId[name.toLowerCase()];
     if (!id) return;
 
-    // Open the family & scroll to the node's editor on selection
     openFamilyAndScrollToNode(id);
 
     const visNodes = visNodesRef.current!;
@@ -919,43 +1114,41 @@ export default function App() {
     setFilterMode("group");
     setSelectedGroup(group);
     setSelectedName("");
-    setLegendActive(new Set(groups)); // keep as-is; filter semantics are driven by selectedGroup
+    setLegendActive(new Set([group]));
 
     if (!visNodesRef.current || !visEdgesRef.current) return;
     const visNodes = visNodesRef.current;
     const visEdges = visEdgesRef.current;
 
-    const familyNodes = nodes.filter((n) => n.Family === group).sort((a,b)=>a.Name.localeCompare(b.Name));
+    const familyNodes = nodes
+      .filter((n) => canonFam(n.Family) === group)
+      .sort((a, b) => a.Name.localeCompare(b.Name));
+
     const groupNodeIds = new Set(familyNodes.map((n) => n.NameID));
     const keepNodes = new Set<string>(groupNodeIds);
     const keepEdges = new Set<string>();
 
     for (const e of visEdges.get()) {
       const from = String(e.from);
-      const to = String(e.to);
       if (groupNodeIds.has(from)) {
         keepEdges.add(String(e.id));
-        keepNodes.add(to);
       }
     }
+
     applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
 
-    // 🔎 polish: open that family and scroll to its first node
     const firstId = familyNodes[0]?.NameID;
     if (firstId) openFamilyAndScrollToNode(firstId);
 
     markDirty();
   }
 
-
-  // Legend chips = exact same semantics as Select by Group
   function toggleLegendFamily(fam: string) {
-    // just delegate to the same handler
     applySelectByGroup(fam);
   }
 
   // -----------------------------
-  // Graph controls (fluid zoom, pan step = 2)
+  // Graph controls
   // -----------------------------
   function zoomIn(step = 1.01) {
     networkRef.current?.moveTo({ scale: (networkRef.current?.getScale() || 1) * step });
@@ -1139,7 +1332,7 @@ export default function App() {
 
   function exportJSON() {
     try {
-      const data = snapshot; // ← use the memoized snapshot which includes nodeDescriptions
+      const data = snapshot; // includes nodeDescriptions
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1188,7 +1381,7 @@ export default function App() {
 
   async function copyShareLink() {
     try {
-      const encoded = base64UrlEncode(JSON.stringify(snapshot)); // ← includes nodeDescriptions
+      const encoded = base64UrlEncode(JSON.stringify(snapshot));
       const url = `${location.origin}${location.pathname}${location.search}#state=${encoded}`;
       await navigator.clipboard.writeText(url);
       alert("Share link copied to clipboard!");
@@ -1199,19 +1392,19 @@ export default function App() {
     }
   }
 
-  // Helpers: list nodes by family (sorted by name)
   const nodesByFamily = useMemo(() => {
     const map = new Map<string, NodeRow[]>();
     for (const n of nodes) {
-      if (!map.has(n.Family)) map.set(n.Family, []);
-      map.get(n.Family)!.push(n);
+      const fam = canonFam(n.Family);
+      if (!map.has(fam)) map.set(fam, []);
+      map.get(fam)!.push({ ...n, Family: fam });
     }
     for (const [, arr] of map) arr.sort((a, b) => a.Name.localeCompare(b.Name));
     return map;
   }, [nodes]);
 
   // -----------------------------
-  // LIFECYCLE HELPERS (re-added)
+  // LIFECYCLE HELPERS
   // -----------------------------
   function startLifecycleCreate() {
     setLifecycleMode("create");
@@ -1244,7 +1437,7 @@ export default function App() {
       const problems: string[] = [];
 
       for (const n of inNodes) {
-        const id = n?.NameID;
+        const id = (n as any)?.NameID;
         if (!id || !nodeIds.has(id)) problems.push(`Nodes sheet: NameID '${id || "(missing)"}' not found in All Nodes`);
       }
       for (const e of inEdges) {
@@ -1256,7 +1449,6 @@ export default function App() {
         return;
       }
 
-      // Load into editor
       setLifecycleMode("edit");
       setTitle(t);
       setDescription(d);
@@ -1264,7 +1456,7 @@ export default function App() {
       for (const e of inEdges) if (e.source && e.target) next.add(`${e.source}->${e.target}`);
       setActiveEdgeKeys(next);
 
-      // Merge any edge descriptions
+      // Merge edge descriptions
       const merged = edges.slice();
       for (const imp of inEdges) {
         if (!imp.source || !imp.target) continue;
@@ -1272,14 +1464,16 @@ export default function App() {
         if (idx >= 0) merged[idx] = { ...merged[idx], description: imp.description ?? merged[idx].description };
       }
       setEdges(merged);
-      // Adopt definitions from imported Nodes sheet as overrides (optional)
+
+      // Node description overrides (optional)
       const importedNodeDesc: Record<string, string> = {};
       for (const n of inNodes) {
-        if (n?.NameID && typeof n?.Definition === "string") {
-          importedNodeDesc[n.NameID] = n.Definition;
-        }
+        const nid = (n as any)?.NameID;
+        const def = (n as any)?.Definition;
+        if (nid && typeof def === "string") importedNodeDesc[nid] = def;
       }
       setNodeDesc(importedNodeDesc);
+
       markDirty();
     } catch (err: any) {
       alert("Failed to load lifecycle: " + (err?.message || "Unknown error"));
@@ -1308,7 +1502,6 @@ export default function App() {
     const reachable = bfsReachable(startNodeId, activeEdgeKeys);
     if (!reachable.has(disposeId)) errs.push("Your path must allow 'Dispose' to be reachable from 'Specify needs'.");
 
-    // terminals = reachable nodes with no outgoing active edges
     const terminals = Array.from(reachable).filter((nodeId) => {
       return !Array.from(activeEdgeKeys).some((key) => key.startsWith(nodeId + "->"));
     });
@@ -1321,7 +1514,6 @@ export default function App() {
       }
     }
 
-    // unreachable sources
     for (const key of activeEdgeKeys) {
       const [src] = key.split("->");
       if (!reachable.has(src)) {
@@ -1390,7 +1582,6 @@ export default function App() {
       description: e.description,
     }));
 
-    // NEW: include node description overrides in the persisted shape
     const nodeDescriptions = Object.entries(nodeDesc).map(([NameID, Definition]) => ({
       NameID,
       Definition,
@@ -1445,27 +1636,24 @@ export default function App() {
   // -----------------------------
   // Render
   // -----------------------------
-    // -----------------------------
-  // Render
-  // -----------------------------
   const activeLabelTextClass = isDark ? "text-neutral-100" : "text-gray-800";
 
   return (
-    <div className="h-screen grid grid-cols-1 lg:grid-cols-[360px_1fr] min-h-0">
+    <div className="h-screen grid grid-cols-1 lg:grid-cols-[432px_1fr] min-h-0">
       {/* Left Pane */}
       <aside
         className={`border-r ${ui.asideBg} backdrop-blur p-4 flex flex-col gap-4 min-h-0`}
         style={{ contain: "paint" }}
       >
-        {/* Centered title + two sibling buttons */}
-        <div className="mb-3 flex flex-col items-center gap-3">
+        {/* Title + start/edit + Examples (Option B aware) */}
+        <div className="mb-3 flex flex-col items-center gap-3 w-full">
           <h2 className="text-lg font-semibold text-center">
             Data and Information Lifecycle Builder
           </h2>
 
           {lifecycleMode === "none" ? (
             <>
-              <div className="flex items-center justify-center gap-3">
+              <div className="grid grid-cols-2 gap-3 w-full max-w-[520px]">
                 <button
                   onClick={startLifecycleCreate}
                   className={`px-3 py-1.5 ${ui.btnPill}`}
@@ -1484,7 +1672,31 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Hidden file input (triggered by Edit button) */}
+              {lifecycleMode === "none" && exampleFiles.length > 0 && (
+                <div className="w-full max-w-[520px] grid grid-cols-[1fr_auto] gap-2">
+                  <select
+                    className={ui.input}
+                    value={selectedExample}
+                    onChange={(e) => setSelectedExample(e.target.value)}
+                    title="Choose an example lifecycle"
+                    aria-label="Choose an example lifecycle"
+                  >
+                    {exampleFiles.map((e) => (
+                      <option key={e.name} value={e.name}>{e.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    className={`px-3 py-1.5 ${ui.btnPill}`}
+                    onClick={() => loadExampleByName(selectedExample)}
+                    title="Load selected example"
+                    aria-label="Load selected example"
+                  >
+                    Load Example
+                  </button>
+                </div>
+              )}
+
+              {/* Hidden file input */}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1511,8 +1723,8 @@ export default function App() {
         {/* Scrollable content (independent of footer) */}
         <div
           ref={leftPaneRef}
-          className="flex-1 min-h-0 overflow-y-auto pr-1 pb-28 overscroll-contain will-change-scroll [transform:translateZ(0)]"
-          style={{ scrollbarGutter: "stable both-edges", contain: "layout paint size" }}
+          className="flex-1 min-h-0 overflow-y-auto pr-4 pb-28 overscroll-contain will-change-scroll [transform:translateZ(0)]"
+          style={{ scrollbarGutter: "stable both-edges", contain: "layout paint size", paddingRight: 16 }}
         >
           {lifecycleMode !== "none" && (
             <div className="space-y-3">
@@ -1537,32 +1749,31 @@ export default function App() {
                 />
               </div>
 
-              {/* Grouped, collapsible editor */}
               <div className="mt-2">
                 <div className="mb-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  className={`px-2 py-1 text-xs ${ui.btnPill}`}
-                  onClick={() => {
-                    const all: Record<string, boolean> = {};
-                    groups.forEach(g => { all[g] = true; });
-                    setOpenFamilies(all);
-                  }}
-                >
-                  Expand all
-                </button>
-                <button
-                  type="button"
-                  className={`px-2 py-1 text-xs ${ui.btnPill}`}
-                  onClick={() => {
-                    const all: Record<string, boolean> = {};
-                    groups.forEach(g => { all[g] = false; });
-                    setOpenFamilies(all);
-                  }}
-                >
-                  Collapse all
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    className={`px-2 py-1 text-xs ${ui.btnPill}`}
+                    onClick={() => {
+                      const all: Record<string, boolean> = {};
+                      groups.forEach(g => { all[g] = true; });
+                      setOpenFamilies(all);
+                    }}
+                  >
+                    Expand all
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-2 py-1 text-xs ${ui.btnPill}`}
+                    onClick={() => {
+                      const all: Record<string, boolean> = {};
+                      groups.forEach(g => { all[g] = false; });
+                      setOpenFamilies(all);
+                    }}
+                  >
+                    Collapse all
+                  </button>
+                </div>
                 {groups.map((fam) => (
                   <details
                     key={fam}
@@ -1607,7 +1818,6 @@ export default function App() {
                               </summary>
 
                               <div className="p-3 space-y-3">
-                                {/* Node description editor */}
                                 <div>
                                   <label className={isDark ? "block text-xs text-neutral-400 mb-1" : "block text-xs text-gray-600 mb-1"}>
                                     Node description (editable for this lifecycle)
@@ -1624,9 +1834,8 @@ export default function App() {
                                   />
                                 </div>
 
-                                {/* Outgoing edges (independent scroller) */}
                                 <div
-                                  className="space-y-2 max-h-[45vh] overflow-y-auto pr-1 overscroll-contain will-change-scroll [transform:translateZ(0)]"
+                                  className="space-y-2 max-h-[45vh] overflow-y-auto pr-3 overscroll-contain will-change-scroll [transform:translateZ(0)]"
                                   style={{ contain: "layout paint size", minHeight: 160 }}
                                 >
                                   <div className={isDark ? "text-xs font-semibold text-neutral-200" : "text-xs font-semibold text-gray-700"} title="Activate edges this node can take; destinations become part of the kept view.">
@@ -1706,7 +1915,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Fixed footer with divider (only when creating/editing) */}
         {lifecycleMode !== "none" && (
           <div className={`mt-3 pt-3 border-t ${ui.divider} flex items-center gap-2`}>
             <button
@@ -1767,15 +1975,11 @@ export default function App() {
           <div className={ui.panelTitle}>View</div>
           <div className="grid grid-cols-3 gap-1">
             <div />
-            {/* Up */}
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(0, PAN_STEP))}>↑</HoldButton>
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan up" onHold={() => beginHold(() => pan(0, PAN_STEP))}>↑</HoldButton>
             <div />
-            {/* Left */}
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(PAN_STEP, 0))}>←</HoldButton>
-            {/* Down */}
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(0, -PAN_STEP))}>↓</HoldButton>
-            {/* Right */}
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => pan(-PAN_STEP, 0))}>→</HoldButton>
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan left" onHold={() => beginHold(() => pan(PAN_STEP, 0))}>←</HoldButton>
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan down" onHold={() => beginHold(() => pan(0, -PAN_STEP))}>↓</HoldButton>
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan right" onHold={() => beginHold(() => pan(-PAN_STEP, 0))}>→</HoldButton>
           </div>
         </div>
 
@@ -1783,9 +1987,9 @@ export default function App() {
         <div className={`absolute bottom-3 right-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
           <div className={ui.panelTitle}>Zoom</div>
           <div className="flex items-center gap-2">
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomIn(1.01))}>＋</HoldButton>
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomOut(1.01))}>－</HoldButton>
-            <button className={`px-2 py-1 ${ui.btnPill}`} onClick={fit}>Fit</button>
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomIn(1.01))} title="Zoom in">＋</HoldButton>
+            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomOut(1.01))} title="Zoom out">－</HoldButton>
+            <button className={`px-2 py-1 ${ui.btnPill}`} onClick={fit} title="Zoom to fit">Fit</button>
           </div>
         </div>
 
@@ -1832,7 +2036,7 @@ export default function App() {
               <option value="">—</option>
               {(lifecycleMode === "none"
                 ? groups
-                : Array.from(new Set(nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => n.Family))).sort()
+                : Array.from(new Set(nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => canonFam(n.Family)))).sort()
               ).map((g) => (
                 <option key={g} value={g}>
                   {g}
@@ -1849,7 +2053,6 @@ export default function App() {
                   ? groups
                   : Array.from(new Set(nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => n.Family))).sort()
               ).map((fam) => {
-                // active if the current group filter equals this family
                 const active = filterMode === "group" && selectedGroup === fam;
                 return (
                   <button
@@ -1879,7 +2082,7 @@ export default function App() {
         {/* Family Boxes (left-middle) */}
         <div className="absolute left-3 top-1/2 -translate-y-1/2 z-0 w-[260px] max-h-[70vh] overflow-y-auto space-y-3 pointer-events-none">
           {groups.map((fam) => {
-            const meta = FAMILY_META[fam] || { main: fam.toLowerCase(), three: "" };
+            const meta = FAMILY_META[fam] || { main: fam };
             const colors = makeColorForFamily(fam);
             const names = (nodesByFamily.get(fam) || []).map(n => n.Name);
             return (
@@ -1894,13 +2097,7 @@ export default function App() {
                 <div className="text-sm font-semibold" style={{ color: "#111" }}>
                   {meta.main}
                 </div>
-                <div className="text-xs mb-2" style={{ color: "#111" }}>
-                  {meta.three}
-                </div>
-                <div
-                  className="border-t-4 mb-2"
-                  style={{ borderColor: colors.border }}
-                />
+                <div className="border-t-4 mb-2" style={{ borderColor: colors.border }} />
                 <div className="text-xs leading-snug" style={{ color: "#111" }}>
                   {names.length ? names.join(", ") : "—"}
                 </div>
@@ -1911,7 +2108,6 @@ export default function App() {
 
         {/* Graph canvas */}
         <div ref={containerRef} className="w-full h-[calc(100vh-0px)]" />
-
       </section>
     </div>
   );
