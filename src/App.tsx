@@ -585,13 +585,6 @@ function stopHold() {
 // ✅ Pan step (kept at 2)
 const PAN_STEP = 2;
 
-// =================== OPTION B: Bundled examples ===================
-// If you put .xlsx files in src/examples/, Vite/ESBuild will bundle them.
-// This glob creates a map like { '/src/examples/1__Foo.xlsx': 'blob-or-asset-url', ... }
-const VITE_EXAMPLES: Record<string, string> =
-  // @ts-ignore - vite-specific import
-  (import.meta as any).glob?.("/src/examples/*.xlsx", { eager: true, as: "url" }) ?? {};
-
 // -----------------------------
 // Main Component
 // -----------------------------
@@ -702,103 +695,50 @@ export default function App() {
     })();
   }, [base]);
 
-  // Dynamic discovery of Examples (Option B first, then public/)
   type ExampleEntry = { name: string; url: string };
-
   const [exampleFiles, setExampleFiles] = useState<ExampleEntry[]>([]);
   const [selectedExample, setSelectedExample] = useState<string>("");
 
-  // Prefer bundled (Option B): import.meta.glob URLs → ExampleEntry[]
-  function discoverExamplesFromBundle(): ExampleEntry[] {
-    const entries: ExampleEntry[] = [];
-    for (const fullPath in VITE_EXAMPLES) {
-      // fullPath like '/src/examples/1__Existant_HR...xlsx'
-      const url = (VITE_EXAMPLES as any)[fullPath] as string;
-      const name = fullPath.split("/").pop() || fullPath;
-      entries.push({ name, url });
-    }
-    // Natural sort by leading number if present
-    entries.sort((a, b) => {
-      const na = parseInt(a.name, 10);
-      const nb = parseInt(b.name, 10);
-      if (!Number.isNaN(na) && !Number.isNaN(nb) && na !== nb) return na - nb;
-      return a.name.localeCompare(b.name);
-    });
-    return entries;
-  }
-
-  // Try manifest.json in /public/examples, otherwise directory listing
-  async function discoverExamplesViaPublic(baseUrl: string): Promise<ExampleEntry[]> {
-    // 1) manifest.json
-    try {
-      const mres = await fetch(`${baseUrl}examples/manifest.json`, { cache: "no-store" });
-      if (mres.ok) {
-        const list: string[] = await mres.json();
-        return list
-          .filter(f => f.toLowerCase().endsWith(".xlsx"))
-          .map(f => ({ name: f, url: `${baseUrl}examples/${encodeURIComponent(f)}` }));
-      }
-    } catch { /* ignore */ }
-
-    // 2) Directory index fallback
-    try {
-      const ires = await fetch(`${baseUrl}examples/`, { cache: "no-store" });
-      if (ires.ok) {
-        const html = await ires.text();
-        const doc = new DOMParser().parseFromString(html, "text/html");
-        const anchors = Array.from(doc.querySelectorAll("a[href]")) as HTMLAnchorElement[];
-        const files = anchors
-          .map(a => decodeURIComponent(a.getAttribute("href") || ""))
-          .map(href => href.replace(/^\.\//, ""))
-          .filter(href => href.toLowerCase().endsWith(".xlsx"));
-        const uniq = Array.from(new Set(files));
-        return uniq.map(f => ({ name: f, url: `${baseUrl}examples/${encodeURIComponent(f)}` }));
-      }
-    } catch { /* ignore */ }
-
-    return [];
-  }
-
-  // Probe on mount for examples
   useEffect(() => {
-    let cancelled = false;
     (async () => {
-      // 1) Option B (bundled src/examples)
-      const bundled = discoverExamplesFromBundle();
-      if (bundled.length) {
-        if (!cancelled) {
-          setExampleFiles(bundled);
-          setSelectedExample(bundled[0]?.name || "");
-        }
-        return;
-      }
-      // 2) Otherwise public/ flow
-      const found = await discoverExamplesViaPublic(base);
-      if (!cancelled) {
-        found.sort((a, b) => {
-          const na = parseInt(a.name, 10);
-          const nb = parseInt(b.name, 10);
-          if (!Number.isNaN(na) && !Number.isNaN(nb) && na !== nb) return na - nb;
-          return a.name.localeCompare(b.name);
-        });
-        setExampleFiles(found);
-        if (found.length) setSelectedExample(found[0].name);
+      try {
+        const res = await fetch(`${base}examples/manifest.json`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`Failed to load examples manifest`);
+        const list: string[] = await res.json();
+
+        // natural sort by leading number if present
+        const entries = list
+          .filter(f => f.toLowerCase().endsWith(".xlsx"))
+          .map(f => ({ name: f, url: `${base}examples/${encodeURIComponent(f)}` }))
+          .sort((a, b) => {
+            const na = parseInt(a.name, 10), nb = parseInt(b.name, 10);
+            if (!Number.isNaN(na) && !Number.isNaN(nb) && na !== nb) return na - nb;
+            return a.name.localeCompare(b.name);
+          });
+
+        setExampleFiles(entries);
+        setSelectedExample(entries[0]?.name ?? "");
+      } catch (e) {
+        console.error(e);
+        setExampleFiles([]);
+        setSelectedExample("");
       }
     })();
-    return () => { cancelled = true; };
   }, [base]);
 
   async function loadExampleByName(fname: string) {
-    // First, try bundled map
-    const bundled = exampleFiles.find(e => e.name === fname);
-    if (!bundled) return;
-    const res = await fetch(bundled.url, { cache: "no-store" });
-    if (!res.ok) {
-      alert(`Could not load example: ${fname}`);
-      return;
-    }
+    const found = exampleFiles.find(e => e.name === fname);
+    if (!found) return;
+    const res = await fetch(found.url, { cache: "no-store" });
+    if (!res.ok) { alert(`Could not load example: ${fname}`); return; }
     const ab = await res.arrayBuffer();
-    const file = new File([ab], fname, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+
+    // ✅ Reuse EXACTLY the same path as user uploads:
+    const file = new File(
+      [ab],
+      fname,
+      { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }
+    );
     await handleLifecycleLoad(file);
   }
 
@@ -1415,67 +1355,142 @@ export default function App() {
   }
 
   async function handleLifecycleLoad(file: File) {
+    // --- helpers to guarantee TEXT everywhere and kill ".0" tails ---
+    const toText = (v: any) => (v == null ? "" : String(v)).trim();
+    const stripDot0 = (s: string) => s.replace(/\.0$/, "");
+
     try {
       const ab = await file.arrayBuffer();
       const wb = XLSX.read(ab);
+
+      const wsMeta  = wb.Sheets["Metadata"];
       const wsNodes = wb.Sheets["Nodes"];
       const wsEdges = wb.Sheets["Edges"];
-      const wsMeta = wb.Sheets["Metadata"];
-      if (!wsNodes || !wsEdges || !wsMeta) throw new Error("Expected sheets: Metadata, Nodes, Edges");
-      const inNodes = XLSX.utils.sheet_to_json<NodeRow>(wsNodes);
-      const inEdges = XLSX.utils.sheet_to_json<EdgeRow>(wsEdges);
-      const metaAoa = XLSX.utils.sheet_to_json<any>(wsMeta, { header: 1 }) as any[][];
-      let t = "", d = "";
-      if (metaAoa && metaAoa[1]) {
-        t = metaAoa[1][0] || "";
-        d = metaAoa[1][1] || "";
+      if (!wsMeta || !wsNodes || !wsEdges) {
+        throw new Error("Expected sheets: Metadata, Nodes, Edges");
       }
 
-      // Validate strict subset
-      const nodeIds = new Set(nodes.map((n) => n.NameID));
-      const edgePairs = new Set(edges.map((e) => `${e.source}->${e.target}`));
+      // --- Metadata (Row 2) ---
+      const metaAoa = XLSX.utils.sheet_to_json<any>(wsMeta, { header: 1, defval: "" }) as any[][];
+      let t = "", d = "";
+      if (Array.isArray(metaAoa) && metaAoa[1]) {
+        t = toText(metaAoa[1][0]); // Title
+        d = toText(metaAoa[1][1]); // Description
+      }
+
+      // --- Nodes (force TEXT and strip any '.0') ---
+      const rawNodes = XLSX.utils.sheet_to_json<any>(wsNodes, { defval: "" });
+      const inNodes: NodeRow[] = (rawNodes as any[]).map((r) => ({
+        Name:       toText(r.Name),
+        Family:     canonFam(toText(r.Family)),
+        NameID:     stripDot0(toText(r.NameID)),
+        FamilyID:   stripDot0(toText(r.FamilyID)),
+        Definition: toText(r.Definition),
+      }));
+
+      // --- Edges (force TEXT and defaults) ---
+      const rawEdges = XLSX.utils.sheet_to_json<any>(wsEdges, { defval: "" });
+      const inEdges: EdgeRow[] = (rawEdges as any[]).map((r, i) => ({
+        id:          toText(r.id) || String(i + 1),
+        source:      stripDot0(toText(r.source)),
+        target:      stripDot0(toText(r.target)),
+        group:       stripDot0(toText(r.group)),           // source FamilyID; recomputed on save anyway
+        description: toText(r.description) || "No description",
+      }));
+
+      // --- Auto-heal anchor rule for older files -------------------
+      // Ensure we contain "Specify needs" and the edge "Specify needs → Acquire".
+      const specifyId = nodes.find(n => n.Name.toLowerCase() === "specify needs")?.NameID;
+      const acquireId = nodes.find(n => n.Name.toLowerCase() === "acquire")?.NameID;
+
+      if (specifyId && acquireId) {
+        const hasSpecify = inNodes.some(n => n.NameID === specifyId);
+        if (!hasSpecify) {
+          const base = nodes.find(n => n.NameID === specifyId)!;
+          // Keep master definition and master family IDs exactly
+          inNodes.push({
+            Name: base.Name,
+            Family: base.Family,
+            NameID: base.NameID,
+            FamilyID: base.FamilyID,
+            Definition: base.Definition,
+          });
+        }
+        const hasSNtoAcquire = inEdges.some(e => e.source === specifyId && e.target === acquireId);
+        if (!hasSNtoAcquire) {
+          inEdges.push({
+            id: String(inEdges.length + 1),
+            source: specifyId,
+            target: acquireId,
+            group: nodes.find(n => n.NameID === specifyId)?.FamilyID || "",
+            description: "No description",
+          });
+        }
+      }
+
+      // --- Validate against master CSV universe (strict subset) ---------------
+      const masterNodeIds = new Set(nodes.map((n) => n.NameID));
+      const masterEdgePairs = new Set(edges.map((e) => `${e.source}->${e.target}`));
       const problems: string[] = [];
 
       for (const n of inNodes) {
-        const id = (n as any)?.NameID;
-        if (!id || !nodeIds.has(id)) problems.push(`Nodes sheet: NameID '${id || "(missing)"}' not found in All Nodes`);
+        if (!n.NameID || !masterNodeIds.has(n.NameID)) {
+          problems.push(`Nodes sheet: NameID '${n.NameID || "(missing)"}' not found in All Nodes`);
+        }
       }
+
       for (const e of inEdges) {
         const key = `${e.source}->${e.target}`;
-        if (!edgePairs.has(key)) problems.push(`Edges sheet: pair '${key}' not found in All Edges`);
+        if (!masterEdgePairs.has(key)) {
+          problems.push(`Edges sheet: pair '${key}' not found in All Edges`);
+        }
       }
+
       if (problems.length) {
         alert("Import failed:\n" + problems.join("\n"));
         return;
       }
 
+      // --- Commit into app state ----------------------------------------------
       setLifecycleMode("edit");
       setTitle(t);
       setDescription(d);
-      const next = new Set<string>();
-      for (const e of inEdges) if (e.source && e.target) next.add(`${e.source}->${e.target}`);
-      setActiveEdgeKeys(next);
 
-      // Merge edge descriptions
-      const merged = edges.slice();
+      // Active edges drive the "edit" mode subgraph
+      const nextActive = new Set<string>();
+      for (const e of inEdges) {
+        if (e.source && e.target) nextActive.add(`${e.source}->${e.target}`);
+      }
+      setActiveEdgeKeys(nextActive);
+
+      // Merge edge descriptions into the master edges list (non-destructive)
+      const mergedEdges = edges.slice();
       for (const imp of inEdges) {
         if (!imp.source || !imp.target) continue;
-        const idx = merged.findIndex((x) => x.source === imp.source && x.target === imp.target);
-        if (idx >= 0) merged[idx] = { ...merged[idx], description: imp.description ?? merged[idx].description };
+        const idx = mergedEdges.findIndex((x) => x.source === imp.source && x.target === imp.target);
+        if (idx >= 0) {
+          mergedEdges[idx] = {
+            ...mergedEdges[idx],
+            description: (imp.description && imp.description.trim())
+                          || mergedEdges[idx].description
+                          || "No description",
+          };
+        }
       }
-      setEdges(merged);
+      setEdges(mergedEdges);
 
-      // Node description overrides (optional)
+      // Optional per-node description overrides (keep master by default)
       const importedNodeDesc: Record<string, string> = {};
       for (const n of inNodes) {
-        const nid = (n as any)?.NameID;
-        const def = (n as any)?.Definition;
-        if (nid && typeof def === "string") importedNodeDesc[nid] = def;
+        if (n.NameID && typeof n.Definition === "string" && n.Definition.trim()) {
+          importedNodeDesc[n.NameID] = n.Definition.trim();
+        }
       }
       setNodeDesc(importedNodeDesc);
 
       markDirty();
     } catch (err: any) {
+      console.error(err);
       alert("Failed to load lifecycle: " + (err?.message || "Unknown error"));
     }
   }
