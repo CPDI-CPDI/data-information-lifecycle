@@ -54,15 +54,27 @@ const HEX_ROWS = [
   { count: 4, offsetCols: 0 },
 ];
 
-// Anchor names (case-insensitive) → slots (row, col)
 const ANCHORS: Record<string, { r: number; c: number }> = {
   "specify needs": { r: 0, c: 0 },
-  discover: { r: 0, c: 1 },
-  acquire: { r: 1, c: 0 },
-  contextualize: { r: 2, c: 2 },
-  share: { r: 2, c: 3 },
-  preserve: { r: 3, c: 2 },
-  dispose: { r: 3, c: 3 },
+  "discover":      { r: 0, c: 1 },
+  "use":           { r: 0, c: 2 },
+  "access":        { r: 0, c: 3 },
+  "protect":       { r: 0, c: 4 },
+
+  "acquire":        { r: 1, c: 0 },
+  "clean":          { r: 1, c: 1 },
+  "contextualise":  { r: 1, c: 2 }, // British spelling per your note
+  "contextualize":  { r: 1, c: 2 }, // keep alias just in case
+  "maintain":       { r: 1, c: 3 },
+
+  "store":    { r: 2, c: 0 },
+  "analyse":  { r: 2, c: 1 },
+  "analyze":  { r: 2, c: 1 }, // alias
+  "curate":   { r: 2, c: 2 },
+  "share":    { r: 2, c: 3 },
+
+  "preserve": { r: 3, c: 2 },
+  "dispose":  { r: 3, c: 3 },
 };
 
 const padLabel = (s: string) => `\u2007${s}\u2007`; // thin padding around labels
@@ -153,6 +165,7 @@ function buildHexSlots(): Array<{ r: number; c: number; x: number; y: number }> 
 
 function computeFixedHexPositions(nodes: NodeRow[]): Record<string, { x: number; y: number }> {
   const slots = buildHexSlots();
+
   const posBySlotKey = new Map<string, { x: number; y: number }>();
   for (const s of slots) posBySlotKey.set(`${s.r}:${s.c}`, { x: s.x, y: s.y });
 
@@ -163,7 +176,7 @@ function computeFixedHexPositions(nodes: NodeRow[]): Record<string, { x: number;
   const positions: Record<string, { x: number; y: number }> = {};
   const byNameLower = Object.fromEntries(nodes.map((n) => [n.Name.toLowerCase(), n]));
 
-  // Place anchors
+  // 1) Place anchors exactly
   for (const [lowerName, slot] of nameToSlot) {
     const n = byNameLower[lowerName];
     if (!n) continue;
@@ -174,14 +187,34 @@ function computeFixedHexPositions(nodes: NodeRow[]): Record<string, { x: number;
     usedSlots.add(key);
   }
 
-  // Fill remaining slots grouped (Family then Name)
+  // 2) Prepare remaining nodes with family priority
+  //    CONFIGURATION first (bottom-left), then INITIATION/ACQUISITION/PROCESSING/DISPOSITION, and LEVERAGING last (bubbles up).
+  const famRank = (famRaw: string) => {
+    const fam = canonFam(famRaw);
+    if (fam === "CONFIGURATION") return -2;     // strongest priority to occupy bottom-left
+    if (fam === "LEVERAGING")    return +2;     // last → bubbles up
+    return 0;                                   // middle
+  };
+
   const remaining = nodes
     .filter((n) => positions[n.NameID] === undefined)
-    .sort((a, b) => (a.Family || "").localeCompare(b.Family || "") || (a.Name || "").localeCompare(b.Name || ""));
+    .sort((a, b) => {
+      const ra = famRank(a.Family), rb = famRank(b.Family);
+      if (ra !== rb) return ra - rb;
+      // tiebreakers for stable, deterministic fill
+      return (a.Name || "").localeCompare(b.Name || "");
+    });
 
-  for (const s of slots) {
-    const key = `${s.r}:${s.c}`;
-    if (usedSlots.has(key)) continue;
+  // 3) Fill remaining slots scanning bottom-left → top-right
+  const freeSlots = slots
+    .filter(s => !usedSlots.has(`${s.r}:${s.c}`))
+    .sort((A, B) => {
+      // larger y (row nearer bottom) first; then smaller x (left) first
+      if (A.y !== B.y) return B.y - A.y;
+      return A.x - B.x;
+    });
+
+  for (const s of freeSlots) {
     const n = remaining.shift();
     if (!n) break;
     positions[n.NameID] = { x: s.x, y: s.y };
@@ -454,8 +487,10 @@ function buildVisDatasets(
     positions?: Record<string, { x: number; y: number }> | null;
     showEdgeTooltips?: boolean;
     activeNodeIds?: Set<string> | null;
+    fontPx?: number; // NEW
   } = {}
 ) {
+  const labelSize = Math.max(9, Math.min(22, options.fontPx ?? 12)); // clamp for readability
   const nodeMapById: Record<string, NodeRow> = Object.fromEntries(nodes.map((n) => [n.NameID, n]));
   const famCache: Record<string, ReturnType<typeof makeColorForFamily>> = {};
 
@@ -489,6 +524,7 @@ function buildVisDatasets(
         shape: "dot",
         size,
         font: {
+          size: labelSize,
           color: isActive ? "#ffffff" : "#9ca3af",
           background: "#000000",
           vadjust: -2,
@@ -601,6 +637,9 @@ export default function App() {
 
   // Per-node description overrides (by NameID)
   const [nodeDesc, setNodeDesc] = useState<Record<string, string>>({});
+
+  //font slider vars
+  const [fontPx, setFontPx] = useState<number>(12); // default label/tooltip size (px)
 
   // Data
   const [nodes, setNodes] = useState<NodeRow[]>([]);
@@ -816,7 +855,8 @@ export default function App() {
     const { visNodes, visEdges } = buildVisDatasets(baseNodes, baseEdges, {
       positions,
       showEdgeTooltips: lifecycleMode !== "none",
-      activeNodeIds: lifecycleMode !== "none" ? activeNodeIds : null
+      activeNodeIds: lifecycleMode !== "none" ? activeNodeIds : null,
+      fontPx,
     });
 
     visNodesRef.current = visNodes;
@@ -890,9 +930,9 @@ export default function App() {
     const showTipFromEvent = (evt: any, text: string) => {
       hideTip();
       const el = document.createElement("div");
-      el.className =
-        "pointer-events-none fixed z-[9999] px-2 py-1 text-xs rounded bg-black text-white shadow";
+      el.className = "pointer-events-none fixed z-[9999] px-2 py-1 rounded bg-black text-white shadow";
       el.style.whiteSpace = "pre-line";
+      el.style.fontSize = `${Math.max(9, Math.min(22, fontPx))}px`; // use slider size
       el.textContent = text;
       tipElRef.current = el;
       document.body.appendChild(el);
@@ -902,7 +942,6 @@ export default function App() {
         el.style.top = e.clientY + 12 + "px";
       };
       move(evt?.srcEvent ?? (evt as any));
-
       const onMove = (e: MouseEvent) => move(e);
       window.addEventListener("mousemove", onMove);
       moveHandlerRef.current = onMove;
@@ -979,7 +1018,7 @@ export default function App() {
       networkRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, lifecycleMode, activeNodeIds]);
+  }, [nodes, edges, lifecycleMode, activeNodeIds, fontPx]);
 
   // Ensure a family is open and scroll the left pane so a node is visible
   function openFamilyAndScrollToNode(nodeId: string) {
@@ -1654,7 +1693,7 @@ export default function App() {
   const activeLabelTextClass = isDark ? "text-neutral-100" : "text-gray-800";
 
   return (
-    <div className="h-screen grid grid-cols-1 lg:grid-cols-[432px_1fr] min-h-0">
+    <div className="h-screen grid grid-cols-1 lg:grid-cols-[minmax(320px,24vw)_1fr] min-h-0">
       {/* Left Pane */}
       <aside
         className={`border-r ${ui.asideBg} backdrop-blur p-4 flex flex-col gap-4 min-h-0`}
@@ -1963,17 +2002,24 @@ export default function App() {
       {/* Right Pane */}
       <section className="relative">
         {/* Export (top-left) */}
-        <div className={`absolute top-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
+        <div className={`absolute top-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel} max-w-[min(360px,42vw)]`}>
           <div className={ui.panelTitle}>Export</div>
           <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportPNG} title="Export the current graph as a PNG image" aria-label="Export PNG">PNG</button>
               <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportSVG} title="Export the current graph as an SVG file" aria-label="Export SVG">SVG</button>
               <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportJSON} title="Export current app state (filters, lifecycle, descriptions) as JSON" aria-label="Export JSON">JSON</button>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <button className={`px-2 py-1 ${ui.btnPill}`} onClick={copyShareLink} title="Copy a shareable URL that restores this exact view" aria-label="Copy share link">Copy Share Link</button>
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={() => importJsonRef.current?.click()} title="Import a previously exported JSON state file" aria-label="Import JSON">Import JSON</button>
+              <button
+                className={`px-2 py-1 ${ui.btnPill}`}
+                onClick={() => importJsonRef.current?.click()}
+                title="Import a previously exported JSON state file"
+                aria-label="Import JSON"
+              >
+                Import JSON
+              </button>
               <input
                 ref={importJsonRef}
                 className="hidden"
@@ -1986,7 +2032,7 @@ export default function App() {
         </div>
 
         {/* View (bottom-left) */}
-        <div className={`absolute bottom-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
+        <div className={`absolute bottom-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel} max-w-[min(260px,34vw)]`}>
           <div className={ui.panelTitle}>View</div>
           <div className="grid grid-cols-3 gap-1">
             <div />
@@ -1999,7 +2045,22 @@ export default function App() {
         </div>
 
         {/* Zoom (bottom-right) */}
-        <div className={`absolute bottom-3 right-3 z-10 rounded-lg p-3 shadow ${ui.panel}`}>
+        <div className={`absolute bottom-3 right-3 z-10 rounded-lg p-3 shadow ${ui.panel} max-w-[min(320px,40vw)]`}>
+          <div className="mt-2 flex items-center gap-2">
+            <label className={ui.panelTitle} style={{ margin: 0 }}>Label size</label>
+            <input
+              type="range"
+              min={9}
+              max={22}
+              step={1}
+              value={fontPx}
+              onChange={(e) => setFontPx(parseInt(e.target.value, 10))}
+              className="w-40"
+              aria-label="Label and tooltip font size"
+              title="Label & tooltip font size"
+            />
+            <span className={isDark ? "text-xs text-neutral-300" : "text-xs text-gray-600"}>{fontPx}px</span>
+          </div>
           <div className={ui.panelTitle}>Zoom</div>
           <div className="flex items-center gap-2">
             <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomIn(1.01))} title="Zoom in">＋</HoldButton>
@@ -2095,7 +2156,7 @@ export default function App() {
         </div>
 
         {/* Family Boxes (left-middle) */}
-        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-0 w-[260px] max-h-[70vh] overflow-y-auto space-y-3 pointer-events-none">
+        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-0 w-[min(260px,40vw)] max-h-[70vh] overflow-y-auto space-y-3 pointer-events-none">
           {groups.map((fam) => {
             const meta = FAMILY_META[fam] || { main: fam };
             const colors = makeColorForFamily(fam);
@@ -2126,6 +2187,7 @@ export default function App() {
       </section>
     </div>
   );
+
 }
 
 /** Small hold-to-repeat button helper using the global controller */
