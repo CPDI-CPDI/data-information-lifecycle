@@ -1,8 +1,24 @@
 @import "tailwindcss";
 
 /* Optional: tiny baseline so you can see it working */
-html, body, #root { height: 100%; margin: 0; }
-body { background: #f9fafb; color: #111827; }
+/* Make body + root fill the viewport and remove centering */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: #f9fafb; 
+  color: #111827;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  max-width: none;   /* important: remove the cap */
+}
 
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
