@@ -374,6 +374,16 @@ function makeColorForFamily(
   return { border, background: bg, highlight: { border: hiBorder, background: hiBg } };
 }
 
+// Fixed display order for family boxes & (optionally) other UI bits
+const FAMILY_ORDER = [
+  "INITIATION",
+  "ACQUISITION",
+  "CONFIGURATION",
+  "PROCESSING",
+  "LEVERAGING",
+  "DISPOSITION",
+];
+
 // 3-word associations per family
 const FAMILY_META: Record<string, { main: string }> = {
   INITIATION: { main: "INITIATION" },
@@ -679,17 +689,6 @@ export default function App() {
   const [selectedGroup, setSelectedGroup] = useState<string>("");
   const [legendActive, setLegendActive] = useState<Set<string>>(new Set(groups));
 
-  const activeFilterLabel = useMemo(() => {
-    if (filterMode === "id" && selectedName) return `Filter: ${selectedName}`;
-    if (filterMode === "group" && selectedGroup) return `Filter: ${selectedGroup} (group)`;
-    if (filterMode === "legend") {
-      const fams = Array.from(legendActive);
-      if (fams.length === 1) return `Filter: ${fams[0]} (legend)`;
-      if (fams.length > 1) return `Filter: ${fams.slice(0, 2).join(", ")}${fams.length > 2 ? "…" : ""} (legend)`;
-    }
-    return null;
-  }, [filterMode, selectedName, selectedGroup, legendActive]);
-
   // Lifecycle editor state
   const [lifecycleMode, setLifecycleMode] = useState<"none" | "create" | "edit">("none");
   const [title, setTitle] = useState("");
@@ -707,6 +706,13 @@ export default function App() {
   const shareId = useMemo(() => nodes.find((r) => r.Name.toLowerCase() === "share")?.NameID ?? "", [nodes]);
 
   const activeNodeIds = useMemo(() => bfsReachable(startNodeId, activeEdgeKeys), [startNodeId, activeEdgeKeys]);
+
+    const orderedFamilies = useMemo(() => {
+    // Start from the canonical groups present in the data
+    const present = new Set(groups);
+    // Keep only families that exist, in the fixed order
+    return FAMILY_ORDER.filter((f) => present.has(f));
+  }, [groups]);
 
   // Left-pane editor adjacency
   const outgoingBySource = useMemo(() => {
@@ -1690,8 +1696,6 @@ export default function App() {
   // -----------------------------
   // Render
   // -----------------------------
-  const activeLabelTextClass = isDark ? "text-neutral-100" : "text-gray-800";
-
   return (
     <div className="h-screen grid grid-cols-1 lg:grid-cols-[minmax(320px,24vw)_1fr] min-h-0">
       {/* Left Pane */}
@@ -2071,14 +2075,6 @@ export default function App() {
 
         {/* Filters (top-right) */}
         <div className="absolute top-3 right-3 z-10 flex flex-col gap-3 w-[min(220px,calc(100vw-48px))]">
-          {activeFilterLabel && (
-            <div className={`rounded-lg p-2 shadow ${ui.panel}`}>
-              <div className={`text-[10px] font-semibold leading-tight break-words max-h-32 overflow-y-auto ${activeLabelTextClass}`}>
-                {activeFilterLabel}
-              </div>
-            </div>
-          )}
-
           <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Filter the graph by a single node (keeps its outgoing edges and destinations).">
             <div className={ui.panelTitle}>Select by Name</div>
             <select
@@ -2110,10 +2106,28 @@ export default function App() {
               }}
             >
               <option value="">—</option>
-              {(lifecycleMode === "none"
-                ? groups
-                : Array.from(new Set(nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => canonFam(n.Family)))).sort()
-              ).map((g) => (
+              {(() => {
+                if (lifecycleMode === "none") {
+                  // All groups, in fixed family order
+                  return orderedFamilies;
+                }
+
+                // Only families actually present in the active subgraph, but still ordered
+                const activeBase = Array.from(
+                  new Set(
+                    nodes
+                      .filter((n) => activeNodeIds.has(n.NameID))
+                      .map((n) => canonFam(n.Family))
+                  )
+                );
+
+                const orderedActive = [
+                  ...FAMILY_ORDER.filter((f) => activeBase.includes(f)),
+                  ...activeBase.filter((f) => !FAMILY_ORDER.includes(f)),
+                ];
+
+                return orderedActive;
+              })().map((g) => (
                 <option key={g} value={g}>
                   {g}
                 </option>
@@ -2124,25 +2138,41 @@ export default function App() {
           <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Legend — click a family to filter (same as Select by Group).">
             <div className={ui.panelTitle}>Legend</div>
             <div className="flex flex-wrap gap-2 justify-center">
-              {(
-                lifecycleMode === "none"
-                  ? groups
-                  : Array.from(new Set(nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => n.Family))).sort()
-              ).map((fam) => {
-                const active = filterMode === "group" && selectedGroup === fam;
-                return (
-                  <button
-                    key={fam}
-                    onClick={() => toggleLegendFamily(fam)}
-                    className={`${ui.chipBase} ${active ? ui.chipActive : ui.chipInactive}`}
-                    title={`Filter by ${fam}`}
-                    aria-label={`Filter by ${fam}`}
-                  >
-                    {fam}
-                  </button>
-                );
-              })}
+              {(() => {
+                if (lifecycleMode === "none") {
+                  // Use orderedFamilies when showing the full graph
+                  return orderedFamilies;
+                }
 
+                // Only families present in the active subgraph, ordered
+                const activeBase = Array.from(
+                  new Set(
+                    nodes
+                      .filter((n) => activeNodeIds.has(n.NameID))
+                      .map((n) => canonFam(n.Family))
+                  )
+                );
+
+                const orderedActive = [
+                  ...FAMILY_ORDER.filter((f) => activeBase.includes(f)),
+                  ...activeBase.filter((f) => !FAMILY_ORDER.includes(f)),
+                ];
+
+                return orderedActive;
+                })().map((fam) => {
+                  const active = filterMode === "group" && selectedGroup === fam;
+                  return (
+                    <button
+                      key={fam}
+                      onClick={() => toggleLegendFamily(fam)}
+                      className={`${ui.chipBase} ${active ? ui.chipActive : ui.chipInactive}`}
+                      title={`Filter by ${fam}`}
+                      aria-label={`Filter by ${fam}`}
+                    >
+                      {fam}
+                    </button>
+                  );
+                })}
               <button
                 onClick={clearFilters}
                 className={`${ui.chipBase} ${ui.chipActive}`}
@@ -2156,11 +2186,12 @@ export default function App() {
         </div>
 
         {/* Family Boxes (left-middle) */}
-        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-0 w-[min(260px,40vw)] max-h-[70vh] overflow-y-auto space-y-3 pointer-events-none">
-          {groups.map((fam) => {
+        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-0 w-[min(280px,26vw)] md:w-[14vw] max-h-[70vh] overflow-y-auto space-y-3 pointer-events-none">
+          {orderedFamilies.map((fam) => {
             const meta = FAMILY_META[fam] || { main: fam };
             const colors = makeColorForFamily(fam);
-            const names = (nodesByFamily.get(fam) || []).map(n => n.Name);
+            const names = (nodesByFamily.get(fam) || []).map((n) => n.Name);
+
             return (
               <div
                 key={fam}
@@ -2170,17 +2201,21 @@ export default function App() {
                   borderColor: colors.border,
                 }}
               >
-                <div className="text-sm font-semibold" style={{ color: "#111" }}>
+                <div className="text-sm md:text-base font-semibold" style={{ color: "#111" }}>
                   {meta.main}
                 </div>
-                <div className="border-t-4 mb-2" style={{ borderColor: colors.border }} />
-                <div className="text-xs leading-snug" style={{ color: "#111" }}>
+                <div
+                  className="border-t-4 mb-2"
+                  style={{ borderColor: colors.border }}
+                />
+                <div className="text-xs md:text-sm leading-snug" style={{ color: "#111" }}>
                   {names.length ? names.join(", ") : "—"}
                 </div>
               </div>
             );
           })}
         </div>
+
 
         {/* Graph canvas */}
         <div ref={containerRef} className="w-full h-[calc(100vh-0px)]" />
