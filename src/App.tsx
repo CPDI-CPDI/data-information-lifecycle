@@ -79,6 +79,9 @@ const ANCHORS: Record<string, { r: number; c: number }> = {
 
 const padLabel = (s: string) => `\u2007${s}\u2007`; // thin padding around labels
 
+const GUIDE_VER = "v1"; // bump this to force the guide to re-open for everyone
+const GUIDE_LS_KEY = `lifecycle_builder_guide_dismissed_${GUIDE_VER}`;
+
 // ── THEME HELPERS ─────────────────────────────────────────────
 function usePrefersDark() {
   const get = () =>
@@ -113,7 +116,7 @@ function makeUiClasses(isDark: boolean) {
     : "rounded-md bg-white text-black border border-neutral-300 hover:bg-neutral-50";
 
   // Legend chips — common base: uniform width + centered text
-  const chipBase = "rounded-full text-sm text-center px-3 py-1 min-w-[160px]";
+  const chipBase = "rounded-full text-sm text-center px-3 py-1 min-w-[140px]";
 
   // High-contrast per theme
   const chipActive = isDark
@@ -293,10 +296,10 @@ async function fetchCsv<T extends Record<string, any> = Record<string, any>>(url
 type Tier = "dark" | "mid" | "soft";
 const FAMILY_TIER: Record<string, Tier> = {
   INITIATION: "dark",
-  ACQUISITION: "mid",
-  LEVERAGING: "soft",
-  CONFIGURATION: "dark",
+  ACQUISITION: "mid",      // keep
+  CONFIGURATION: "mid",    // ⬅️ was "dark" — mid makes it less harsh
   PROCESSING: "soft",
+  LEVERAGING: "soft",
   DISPOSITION: "mid",
 
   // long display names map to same family
@@ -310,12 +313,12 @@ const FAMILY_TIER: Record<string, Tier> = {
 
 // --- Stable, CVD-friendly base hues per family (distinct around wheel) ---
 const BASE_HUES: Record<string, number> = {
-  INITIATION: 30,   // amber
-  ACQUISITION: 210, // blue
-  LEVERAGING: 305,  // magenta
-  CONFIGURATION: 15,// orange
-  PROCESSING: 95,  // green
-  DISPOSITION: 265, // violet
+  INITIATION: 30,    // keep amber
+  ACQUISITION: 190,  // ⬅️ tone down (less “strong blue” than 210)
+  LEVERAGING: 305,   // keep
+  CONFIGURATION: 0,  // ⬅️ make this true red family hue
+  PROCESSING: 95,    // keep
+  DISPOSITION: 265,  // keep
 
   "Plan, design & enable": 30,
   "Create, Capture & Collect": 210,
@@ -374,16 +377,6 @@ function makeColorForFamily(
   return { border, background: bg, highlight: { border: hiBorder, background: hiBg } };
 }
 
-// Fixed display order for family boxes & (optionally) other UI bits
-const FAMILY_ORDER = [
-  "INITIATION",
-  "ACQUISITION",
-  "CONFIGURATION",
-  "PROCESSING",
-  "LEVERAGING",
-  "DISPOSITION",
-];
-
 // 3-word associations per family
 const FAMILY_META: Record<string, { main: string }> = {
   INITIATION: { main: "INITIATION" },
@@ -393,6 +386,26 @@ const FAMILY_META: Record<string, { main: string }> = {
   LEVERAGING:   { main: "LEVERAGING" },
   DISPOSITION:  { main: "DISPOSITION" },
 };
+
+const CANON_FAMILY_ORDER = [
+  "INITIATION",
+  "ACQUISITION",
+  "CONFIGURATION",
+  "PROCESSING",
+  "LEVERAGING",
+  "DISPOSITION",
+] as const;
+
+function sortFamiliesCanonical(fams: string[]) {
+  const rank = new Map<string, number>(CANON_FAMILY_ORDER.map((f, i) => [f, i]));
+  const uniq = Array.from(new Set(fams.map(canonFam)));
+  return uniq.sort((a, b) => {
+    const ra = rank.has(a) ? (rank.get(a) as number) : 999;
+    const rb = rank.has(b) ? (rank.get(b) as number) : 999;
+    if (ra !== rb) return ra - rb;
+    return a.localeCompare(b);
+  });
+}
 
 // -----------------------------
 // Graph + Filtering logic
@@ -658,16 +671,25 @@ export default function App() {
   // Mappings
   const nodeById = useMemo(() => Object.fromEntries(nodes.map((n) => [n.NameID, n])), [nodes]);
   const nameToId = useMemo(() => Object.fromEntries(nodes.map((n) => [n.Name.toLowerCase(), n.NameID])), [nodes]);
-  const groups = useMemo(
-    () => Array.from(new Set(nodes.map((n) => canonFam(n.Family)))).sort(),
+  const orderedFamilies = useMemo(
+    () => sortFamiliesCanonical(nodes.map((n) => canonFam(n.Family))),
     [nodes]
   );
+
+  // keep "groups" name if you use it everywhere already
+  const groups = orderedFamilies;
 
   // Graph
   const containerRef = useRef<HTMLDivElement | null>(null);
   const networkRef = useRef<Network | null>(null);
   const visNodesRef = useRef<DataSet<VisNode> | null>(null);
   const visEdgesRef = useRef<DataSet<VisEdge> | null>(null);
+
+  const exportPanelRef = useRef<HTMLDivElement | null>(null);
+  const familyPanelRef = useRef<HTMLDivElement | null>(null);
+  const viewPanelRef = useRef<HTMLDivElement | null>(null);
+  const legendPanelRef = useRef<HTMLDivElement | null>(null);
+  const zoomPanelRef = useRef<HTMLDivElement | null>(null);
 
   // viewport persistence
   const initialFitDoneRef = useRef(false); // only auto-fit once
@@ -687,7 +709,12 @@ export default function App() {
   const [filterMode, setFilterMode] = useState<FilterMode>(null);
   const [selectedName, setSelectedName] = useState<string>("");
   const [selectedGroup, setSelectedGroup] = useState<string>("");
-  const [legendActive, setLegendActive] = useState<Set<string>>(new Set(groups));
+  const [legendActive, setLegendActive] = useState<Set<string>>(new Set());
+
+  // whenever families load/refresh, ensure legendActive has defaults if empty
+  useEffect(() => {
+    setLegendActive((prev) => (prev.size ? prev : new Set(groups)));
+  }, [groups]);
 
   // Lifecycle editor state
   const [lifecycleMode, setLifecycleMode] = useState<"none" | "create" | "edit">("none");
@@ -707,12 +734,20 @@ export default function App() {
 
   const activeNodeIds = useMemo(() => bfsReachable(startNodeId, activeEdgeKeys), [startNodeId, activeEdgeKeys]);
 
-    const orderedFamilies = useMemo(() => {
-    // Start from the canonical groups present in the data
-    const present = new Set(groups);
-    // Keep only families that exist, in the fixed order
-    return FAMILY_ORDER.filter((f) => present.has(f));
-  }, [groups]);
+  const [showGuide, setShowGuide] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(GUIDE_LS_KEY) !== "true";
+    } catch {
+      return true;
+    }
+  });
+
+  function closeGuide() {
+    try {
+      localStorage.setItem(GUIDE_LS_KEY, "true");
+    } catch {}
+    setShowGuide(false);
+  }
 
   // Left-pane editor adjacency
   const outgoingBySource = useMemo(() => {
@@ -723,6 +758,16 @@ export default function App() {
     }
     return m;
   }, [edges]);
+
+  const visibleFamilies = useMemo(() => {
+    if (lifecycleMode === "none") return groups;
+
+    const fams = nodes
+      .filter((n) => activeNodeIds.has(n.NameID))
+      .map((n) => canonFam(n.Family));
+
+    return sortFamiliesCanonical(fams);
+  }, [lifecycleMode, groups, nodes, activeNodeIds]);
 
   // CSV load
   useEffect(() => {
@@ -1141,9 +1186,103 @@ export default function App() {
   function zoomOut(step = 1.01) {
     networkRef.current?.moveTo({ scale: (networkRef.current?.getScale() || 1) / step });
   }
-  function fit() {
-    networkRef.current?.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
+  function fitUsable() {
+    const net = networkRef.current;
+    const container = containerRef.current;
+    if (!net || !container) return;
+
+    // --- DOM limiting box (px), inside the vis container ---
+    const containerRect = container.getBoundingClientRect();
+
+    const exportRect = exportPanelRef.current?.getBoundingClientRect();
+    const groupsRect = familyPanelRef.current?.getBoundingClientRect();
+    const legendRect = legendPanelRef.current?.getBoundingClientRect();
+    const zoomRect = zoomPanelRef.current?.getBoundingClientRect();
+
+    // Limits you specified:
+    // top = bottom of save/export
+    // bottom = top of zoom box
+    // left = right of groups
+    // right = left of legend
+    const pad = 12;
+
+    const topPx = (exportRect ? exportRect.bottom : containerRect.top) - containerRect.top + pad;
+    const bottomPx = (zoomRect ? zoomRect.top : containerRect.bottom) - containerRect.top - pad;
+    const leftPx = (groupsRect ? groupsRect.right : containerRect.left) - containerRect.left + pad;
+    const rightPx = (legendRect ? legendRect.left : containerRect.right) - containerRect.left - pad;
+
+    const limW = Math.max(50, rightPx - leftPx);
+    const limH = Math.max(50, bottomPx - topPx);
+
+    const limCenterX = leftPx + limW / 2;
+    const limCenterY = topPx + limH / 2;
+
+    // --- Graph "box" in network coords using anchors ---
+    // Top-left: Specify needs (center)
+    // Right-most: Share (center)
+    // Bottom-most: Dispose (center)
+    const positions = computeFixedHexPositions(nodes);
+
+    const specifyId = startNodeId; // already computed for "specify needs"
+    const shareNodeId = shareId;   // already computed for "share"
+    const disposeNodeId = disposeId; // already computed for "dispose"
+
+    const pSpec = positions[specifyId];
+    const pShare = positions[shareNodeId];
+    const pDisp = positions[disposeNodeId];
+
+    if (!pSpec || !pShare || !pDisp) return;
+
+    // Base graph box (network units)
+    const gLeft = pSpec.x;
+    const gTop = pSpec.y;
+    const gRight = pShare.x;
+    const gBottom = pDisp.y;
+
+    const graphW = Math.max(1, gRight - gLeft);
+    const graphH = Math.max(1, gBottom - gTop);
+
+    const limRatio = limW / limH;
+    const graphRatio = graphW / graphH;
+
+    // Your 0.85 "breathing room" rule + ratio branch
+    const fill = 0.85;
+
+    let scale: number;
+    if (graphRatio >= limRatio) {
+      // graph is "wider" (more length per height) -> fit width
+      scale = (limW * fill) / graphW;
+    } else {
+      // graph is "taller" -> fit height
+      scale = (limH * fill) / graphH;
+    }
+
+    // Center of the graph box in network coords
+    const graphCenter = {
+      x: (gLeft + gRight) / 2,
+      y: (gTop + gBottom) / 2,
+    };
+
+    // net.moveTo uses "position = network coords at canvas center".
+    // We want the *graph center* to appear at limCenter (px) inside container.
+    const containerCenterX = containerRect.width / 2;
+    const containerCenterY = containerRect.height / 2;
+
+    const dxPx = limCenterX - containerCenterX;
+    const dyPx = limCenterY - containerCenterY;
+
+    const pos = {
+      x: graphCenter.x - dxPx / scale,
+      y: graphCenter.y - dyPx / scale,
+    };
+
+    net.moveTo({
+      position: pos,
+      scale,
+      animation: { duration: 250, easingFunction: "easeInOutQuad" },
+    });
   }
+
   function pan(dx: number, dy: number) {
     const p = networkRef.current?.getViewPosition();
     const s = networkRef.current?.getScale() || 1;
@@ -1703,7 +1842,7 @@ export default function App() {
         className={`border-r ${ui.asideBg} backdrop-blur p-4 flex flex-col gap-4 min-h-0`}
         style={{ contain: "paint" }}
       >
-        {/* Title + start/edit + Examples (Option B aware) */}
+        {/* Title + start/edit + Examples */}
         <div className="mb-3 flex flex-col items-center gap-3 w-full">
           <h2 className="text-lg font-semibold text-center">
             Data and Information Lifecycle Builder
@@ -1730,7 +1869,7 @@ export default function App() {
                 </button>
               </div>
 
-              {lifecycleMode === "none" && exampleFiles.length > 0 && (
+              {exampleFiles.length > 0 && (
                 <div className="w-full max-w-[520px] grid grid-cols-[1fr_auto] gap-2">
                   <select
                     className={ui.input}
@@ -1740,7 +1879,9 @@ export default function App() {
                     aria-label="Choose an example lifecycle"
                   >
                     {exampleFiles.map((e) => (
-                      <option key={e.name} value={e.name}>{e.name}</option>
+                      <option key={e.name} value={e.name}>
+                        {e.name}
+                      </option>
                     ))}
                   </select>
                   <button
@@ -1754,7 +1895,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Hidden file input */}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1778,7 +1918,7 @@ export default function App() {
           )}
         </div>
 
-        {/* Scrollable content (independent of footer) */}
+        {/* Scrollable content */}
         <div
           ref={leftPaneRef}
           className="flex-1 min-h-0 overflow-y-auto pr-4 pb-28 overscroll-contain will-change-scroll [transform:translateZ(0)]"
@@ -1787,8 +1927,9 @@ export default function App() {
           {lifecycleMode !== "none" && (
             <div className="space-y-3">
               <p className={isDark ? "text-sm text-neutral-300" : "text-sm text-gray-600"}>
-                Lifecycles start at <b>Specify needs</b> and end at <b>Dispose</b>. Branches may rejoin the main path or end at <b>Share</b>. Cycles are allowed.
-                A lifecycle must have a <b>Title</b> and <b>Description</b>. Bi-directional edges require two selections.
+                Lifecycles start at <b>Specify needs</b> and end at <b>Dispose</b>. Branches may rejoin the
+                main path or end at <b>Share</b>. Cycles are allowed. A lifecycle must have a <b>Title</b>{" "}
+                and <b>Description</b>. Bi-directional edges require two selections.
               </p>
 
               <div className="grid grid-cols-1 gap-2">
@@ -1796,13 +1937,19 @@ export default function App() {
                   className={ui.input}
                   placeholder="Lifecycle Title"
                   value={title}
-                  onChange={(e) => { setTitle(e.target.value); markDirty(); }}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    markDirty();
+                  }}
                 />
                 <textarea
                   className={ui.input}
                   placeholder="Lifecycle Description"
                   value={description}
-                  onChange={(e) => { setDescription(e.target.value); markDirty(); }}
+                  onChange={(e) => {
+                    setDescription(e.target.value);
+                    markDirty();
+                  }}
                   rows={3}
                 />
               </div>
@@ -1814,7 +1961,9 @@ export default function App() {
                     className={`px-2 py-1 text-xs ${ui.btnPill}`}
                     onClick={() => {
                       const all: Record<string, boolean> = {};
-                      groups.forEach(g => { all[g] = true; });
+                      groups.forEach((g) => {
+                        all[g] = true;
+                      });
                       setOpenFamilies(all);
                     }}
                   >
@@ -1825,26 +1974,37 @@ export default function App() {
                     className={`px-2 py-1 text-xs ${ui.btnPill}`}
                     onClick={() => {
                       const all: Record<string, boolean> = {};
-                      groups.forEach(g => { all[g] = false; });
+                      groups.forEach((g) => {
+                        all[g] = false;
+                      });
                       setOpenFamilies(all);
                     }}
                   >
                     Collapse all
                   </button>
                 </div>
+
                 {groups.map((fam) => (
                   <details
                     key={fam}
-                    className={(isDark
-                      ? "border border-neutral-700 rounded-md mb-2 bg-neutral-900 shadow-sm"
-                      : "border rounded-md mb-2 bg-white shadow-sm") + " contain-paint"}
+                    className={
+                      (isDark
+                        ? "border border-neutral-700 rounded-md mb-2 bg-neutral-900 shadow-sm"
+                        : "border rounded-md mb-2 bg-white shadow-sm") + " contain-paint"
+                    }
                     open={openFamilies[fam] ?? true}
                     onToggle={(e) => {
                       const open = (e.currentTarget as HTMLDetailsElement).open;
-                      setOpenFamilies(prev => ({ ...prev, [fam]: open }));
+                      setOpenFamilies((prev) => ({ ...prev, [fam]: open }));
                     }}
                   >
-                    <summary className={isDark ? "px-3 py-2 cursor-pointer bg-neutral-800 font-medium text-sm flex items-center justify-between" : "px-3 py-2 cursor-pointer bg-gray-100 font-medium text-sm flex items-center justify-between"}>
+                    <summary
+                      className={
+                        isDark
+                          ? "px-3 py-2 cursor-pointer bg-neutral-800 font-medium text-sm flex items-center justify-between"
+                          : "px-3 py-2 cursor-pointer bg-gray-100 font-medium text-sm flex items-center justify-between"
+                      }
+                    >
                       <span>{fam}</span>
                     </summary>
 
@@ -1852,15 +2012,23 @@ export default function App() {
                       {nodes
                         .filter((n) => n.Family === fam)
                         .map((n) => {
-                          const isNodeActive = activeNodeIds.has(n.NameID) || n.NameID === startNodeId;
+                          const isNodeActive =
+                            activeNodeIds.has(n.NameID) || n.NameID === startNodeId;
 
                           return (
                             <details
                               key={n.NameID}
-                              ref={(el) => { nodeDetailsRefs.current[n.NameID] = el; }}
-                              className={`border rounded-md shadow-sm will-change-transform [transform:translateZ(0)] ${ 
-                                isNodeActive ? (isDark ? "bg-neutral-900 border-neutral-700" : "bg-white")
-                                            : (isDark ? "bg-neutral-900/70 border-neutral-700 opacity-60" : "bg-gray-50 opacity-60")
+                              ref={(el) => {
+                                nodeDetailsRefs.current[n.NameID] = el;
+                              }}
+                              className={`border rounded-md shadow-sm will-change-transform [transform:translateZ(0)] ${
+                                isNodeActive
+                                  ? isDark
+                                    ? "bg-neutral-900 border-neutral-700"
+                                    : "bg-white"
+                                  : isDark
+                                    ? "bg-neutral-900/70 border-neutral-700 opacity-60"
+                                    : "bg-gray-50 opacity-60"
                               }`}
                               open={n.NameID === startNodeId}
                             >
@@ -1868,7 +2036,9 @@ export default function App() {
                                 <span className="font-medium text-sm">{n.Name}</span>
                                 <span
                                   className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
-                                    isNodeActive ? "bg-emerald-600 text-white" : "bg-gray-400 text-white"
+                                    isNodeActive
+                                      ? "bg-emerald-600 text-white"
+                                      : "bg-gray-400 text-white"
                                   }`}
                                 >
                                   {isNodeActive ? "Active" : "Inactive"}
@@ -1877,7 +2047,13 @@ export default function App() {
 
                               <div className="p-3 space-y-3">
                                 <div>
-                                  <label className={isDark ? "block text-xs text-neutral-400 mb-1" : "block text-xs text-gray-600 mb-1"}>
+                                  <label
+                                    className={
+                                      isDark
+                                        ? "block text-xs text-neutral-400 mb-1"
+                                        : "block text-xs text-gray-600 mb-1"
+                                    }
+                                  >
                                     Node description (editable for this lifecycle)
                                   </label>
                                   <textarea
@@ -1886,7 +2062,7 @@ export default function App() {
                                     value={nodeDesc[n.NameID] ?? n.Definition}
                                     onChange={(ev) => {
                                       const v = ev.target.value;
-                                      setNodeDesc(prev => ({ ...prev, [n.NameID]: v }));
+                                      setNodeDesc((prev) => ({ ...prev, [n.NameID]: v }));
                                       markDirty();
                                     }}
                                   />
@@ -1896,11 +2072,23 @@ export default function App() {
                                   className="space-y-2 max-h-[45vh] overflow-y-auto pr-3 overscroll-contain will-change-scroll [transform:translateZ(0)]"
                                   style={{ contain: "layout paint size", minHeight: 160 }}
                                 >
-                                  <div className={isDark ? "text-xs font-semibold text-neutral-200" : "text-xs font-semibold text-gray-700"} title="Activate edges this node can take; destinations become part of the kept view.">
+                                  <div
+                                    className={
+                                      isDark
+                                        ? "text-xs font-semibold text-neutral-200"
+                                        : "text-xs font-semibold text-gray-700"
+                                    }
+                                    title="Activate edges this node can take; destinations become part of the kept view."
+                                  >
                                     Outgoing edges
                                   </div>
-                                  { (outgoingBySource.get(n.NameID) ?? []).length === 0 && (
-                                    <div className={isDark ? "text-xs text-neutral-400" : "text-xs text-gray-500"}>
+
+                                  {(outgoingBySource.get(n.NameID) ?? []).length === 0 && (
+                                    <div
+                                      className={
+                                        isDark ? "text-xs text-neutral-400" : "text-xs text-gray-500"
+                                      }
+                                    >
                                       No outgoing edges defined for this node.
                                     </div>
                                   )}
@@ -1910,15 +2098,20 @@ export default function App() {
                                     const isEdgeOn = activeEdgeKeys.has(key);
                                     const targetName = nodeById[e.target]?.Name || e.target;
 
-                                    const canEditThisEdge = n.NameID === startNodeId || activeNodeIds.has(n.NameID);
+                                    const canEditThisEdge =
+                                      n.NameID === startNodeId || activeNodeIds.has(n.NameID);
 
                                     return (
                                       <div
                                         key={key}
                                         className={`border rounded-md p-2 flex flex-col gap-2 text-sm shadow-sm ${
                                           canEditThisEdge
-                                            ? (isDark ? "bg-neutral-900 border-neutral-700" : "bg-white")
-                                            : (isDark ? "bg-neutral-900/70 border-neutral-700" : "bg-gray-100")
+                                            ? isDark
+                                              ? "bg-neutral-900 border-neutral-700"
+                                              : "bg-white"
+                                            : isDark
+                                              ? "bg-neutral-900/70 border-neutral-700"
+                                              : "bg-gray-100"
                                         }`}
                                       >
                                         <label className="flex items-center gap-2">
@@ -1947,7 +2140,9 @@ export default function App() {
                                           value={e.description || ""}
                                           onChange={(ev) => {
                                             const val = ev.target.value;
-                                            const idx = edges.findIndex((x) => x.source === e.source && x.target === e.target);
+                                            const idx = edges.findIndex(
+                                              (x) => x.source === e.source && x.target === e.target
+                                            );
                                             if (idx >= 0) {
                                               const next = edges.slice();
                                               next[idx] = { ...next[idx], description: val };
@@ -1981,11 +2176,8 @@ export default function App() {
               aria-label="Validate lifecycle"
               onClick={() => {
                 const errs = getLifecycleErrors();
-                if (errs.length === 0) {
-                  alert("Lifecycle valid. You can now Save.");
-                } else {
-                  alert("Validation failed:\n\n" + errs.join("\n"));
-                }
+                if (errs.length === 0) alert("Lifecycle valid. You can now Save.");
+                else alert("Validation failed:\n\n" + errs.join("\n"));
               }}
             >
               Validate
@@ -1994,10 +2186,10 @@ export default function App() {
               className={`px-3 py-1.5 ${ui.btnPill} disabled:opacity-50`}
               disabled={getLifecycleErrors().length > 0}
               onClick={saveLifecycle}
-              title="Save this lifecycle to an .xlsx workbook"
+              title="Download a validated lifecycle workbook (.xlsx) you can reuse or share"
               aria-label="Save lifecycle to XLSX"
             >
-              Save Lifecycle (XLSX)
+              Download Lifecycle (XLSX)
             </button>
           </div>
         )}
@@ -2005,161 +2197,213 @@ export default function App() {
 
       {/* Right Pane */}
       <section className="relative">
-        {/* Export (top-left) */}
-        <div className={`absolute top-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel} max-w-[min(360px,42vw)]`}>
-          <div className={ui.panelTitle}>Export</div>
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2 flex-wrap">
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportPNG} title="Export the current graph as a PNG image" aria-label="Export PNG">PNG</button>
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportSVG} title="Export the current graph as an SVG file" aria-label="Export SVG">SVG</button>
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={exportJSON} title="Export current app state (filters, lifecycle, descriptions) as JSON" aria-label="Export JSON">JSON</button>
-            </div>
-            <div className="flex gap-2 flex-wrap">
-              <button className={`px-2 py-1 ${ui.btnPill}`} onClick={copyShareLink} title="Copy a shareable URL that restores this exact view" aria-label="Copy share link">Copy Share Link</button>
-              <button
-                className={`px-2 py-1 ${ui.btnPill}`}
-                onClick={() => importJsonRef.current?.click()}
-                title="Import a previously exported JSON state file"
-                aria-label="Import JSON"
+        <GuideOverlay
+          open={showGuide}
+          isDark={isDark}
+          onClose={closeGuide}
+          onStart={() => {
+            closeGuide();
+            startLifecycleCreate();
+          }}
+          onLoadExample={() => {
+            closeGuide();
+            if (selectedExample) loadExampleByName(selectedExample);
+          }}
+          hasExamples={exampleFiles.length > 0}
+        />
+
+        {/* LEFT COLUMN (Export + Group Boxes + View) */}
+        <div
+          className="
+            absolute left-1 top-3 bottom-3 z-30
+            w-[clamp(230px,18vw,320px)]
+            flex flex-col gap-2
+            pointer-events-none
+          "
+        >
+          {/* Export — sticks out RIGHT + longer */}
+          <div
+            ref={exportPanelRef}
+            className={`
+              ${ui.panel} rounded-lg shadow pointer-events-auto
+              w-[clamp(420px,44vw,500px)]
+            `}
+          >
+            <div className="px-3 pt-3 pb-2">
+              <div className={ui.panelTitle} style={{ fontSize: "clamp(10px, 0.75vw, 12px)" }}>
+                Save & Export
+              </div>
+
+              {/* one-line blurb */}
+              <div
+                className={isDark ? "text-neutral-300" : "text-gray-600"}
+                style={{
+                  fontSize: "clamp(9px, 0.68vw, 11px)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  lineHeight: 1.15,
+                  marginBottom: 8,
+                }}
               >
-                Import JSON
-              </button>
-              <input
-                ref={importJsonRef}
-                className="hidden"
-                type="file"
-                accept="application/json"
-                onChange={(e) => e.target.files && importJSON(e.target.files[0])}
-              />
+                Progress auto-saves in this browser — use Share Link or Download State (JSON) to continue elsewhere.
+              </div>
+
+              {/* 2-col grid for consistent 2 rows; third row for the long button */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className={`px-2 py-1.5 ${ui.btnPill}`}
+                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
+                  onClick={exportPNG}
+                >
+                  Download PNG
+                </button>
+
+                <button
+                  className={`px-2 py-1.5 ${ui.btnPill}`}
+                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
+                  onClick={exportSVG}
+                >
+                  Download SVG
+                </button>
+
+                <button
+                  className={`px-2 py-1.5 ${ui.btnPill}`}
+                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
+                  onClick={exportJSON}
+                >
+                  Download State (JSON)
+                </button>
+
+                {/* SWAPPED: Load State takes this slot now */}
+                <button
+                  className={`px-2 py-1.5 ${ui.btnPill}`}
+                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
+                  onClick={() => importJsonRef.current?.click()}
+                >
+                  Load State (JSON)
+                </button>
+
+                {/* SWAPPED: Save Progress goes to the full-width row */}
+                <button
+                  className={`px-2 py-1.5 ${ui.btnPill} col-span-2`}
+                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
+                  onClick={copyShareLink}
+                >
+                  Save Progress (Share Link)
+                </button>
+
+                <input
+                  ref={importJsonRef}
+                  className="hidden"
+                  type="file"
+                  accept="application/json"
+                  onChange={(e) => e.target.files && importJSON(e.target.files[0])}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Groups — SAME WIDTH AS COLUMN, takes ALL remaining height */}
+          <div
+            ref={familyPanelRef}
+            className={`${ui.panel} rounded-lg shadow pointer-events-auto flex-1 min-h-0 overflow-hidden px-2 py-4 flex flex-col`}
+            style={{ scrollbarGutter: "stable both-edges" }}
+          >
+            <div className={ui.panelTitle}>Groups</div>
+
+            {/* legend-style scroller */}
+            <div className="flex-1 min-h-0 overflow-auto pr-2 overscroll-contain touch-pan-y pb-6">
+              <div className="flex flex-col gap-2">
+                {(lifecycleMode === "none" ? groups : visibleFamilies).map((fam) => {
+                  const meta = FAMILY_META[fam] || { main: fam };
+                  const colors = makeColorForFamily(fam);
+                  const names = (nodesByFamily.get(fam) || []).map((n) => n.Name);
+
+                  return (
+                    <div
+                      key={fam}
+                      className="rounded-lg border-2 shadow-sm p-2"
+                      style={{ background: colors.background, borderColor: colors.border }}
+                    >
+                      <div className="font-semibold leading-tight" style={{ color: "#111", fontSize: "clamp(11px, 0.85vw, 14px)" }}>
+                        {meta.main}
+                      </div>
+                      <div className="border-t-4 my-1" style={{ borderColor: colors.border }} />
+                      <div className="leading-snug" style={{ color: "#111", fontSize: "clamp(10px, 0.8vw, 13px)" }}>
+                        {names.length ? names.join(", ") : "—"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* View — SAME WIDTH AS COLUMN */}
+          <div
+            ref={viewPanelRef}
+            className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto mt-auto`}
+            style={{ width: "clamp(200px, 14vw, 260px)" }}
+          >
+            <div className={ui.panelTitle}>View</div>
+            <div className="grid grid-cols-3 gap-1">
+              <div />
+              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan up" onHold={() => beginHold(() => pan(0, PAN_STEP))}>↑</HoldButton>
+              <div />
+              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan left" onHold={() => beginHold(() => pan(PAN_STEP, 0))}>←</HoldButton>
+              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan down" onHold={() => beginHold(() => pan(0, -PAN_STEP))}>↓</HoldButton>
+              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan right" onHold={() => beginHold(() => pan(-PAN_STEP, 0))}>→</HoldButton>
             </div>
           </div>
         </div>
 
-        {/* View (bottom-left) */}
-        <div className={`absolute bottom-3 left-3 z-10 rounded-lg p-3 shadow ${ui.panel} max-w-[min(260px,34vw)]`}>
-          <div className={ui.panelTitle}>View</div>
-          <div className="grid grid-cols-3 gap-1">
-            <div />
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan up" onHold={() => beginHold(() => pan(0, PAN_STEP))}>↑</HoldButton>
-            <div />
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan left" onHold={() => beginHold(() => pan(PAN_STEP, 0))}>←</HoldButton>
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan down" onHold={() => beginHold(() => pan(0, -PAN_STEP))}>↓</HoldButton>
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} title="Pan right" onHold={() => beginHold(() => pan(-PAN_STEP, 0))}>→</HoldButton>
-          </div>
-        </div>
-
-        {/* Zoom (bottom-right) */}
-        <div className={`absolute bottom-3 right-3 z-10 rounded-lg p-3 shadow ${ui.panel} max-w-[min(320px,40vw)]`}>
-          <div className="mt-2 flex items-center gap-2">
-            <label className={ui.panelTitle} style={{ margin: 0 }}>Label size</label>
-            <input
-              type="range"
-              min={9}
-              max={22}
-              step={1}
-              value={fontPx}
-              onChange={(e) => setFontPx(parseInt(e.target.value, 10))}
-              className="w-40"
-              aria-label="Label and tooltip font size"
-              title="Label & tooltip font size"
-            />
-            <span className={isDark ? "text-xs text-neutral-300" : "text-xs text-gray-600"}>{fontPx}px</span>
-          </div>
-          <div className={ui.panelTitle}>Zoom</div>
-          <div className="flex items-center gap-2">
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomIn(1.01))} title="Zoom in">＋</HoldButton>
-            <HoldButton className={`px-2 py-1 ${ui.btnPill}`} onHold={() => beginHold(() => zoomOut(1.01))} title="Zoom out">－</HoldButton>
-            <button className={`px-2 py-1 ${ui.btnPill}`} onClick={fit} title="Zoom to fit">Fit</button>
-          </div>
-        </div>
-
-        {/* Filters (top-right) */}
-        <div className="absolute top-3 right-3 z-10 flex flex-col gap-3 w-[min(220px,calc(100vw-48px))]">
-          <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Filter the graph by a single node (keeps its outgoing edges and destinations).">
-            <div className={ui.panelTitle}>Select by Name</div>
+        {/* RIGHT COLUMN (Select / Legend / Zoom) */}
+        <div
+          className="
+            absolute right-3 top-3 bottom-3 z-20
+            w-[min(165px,calc(100vw-48px))]
+            flex flex-col gap-2
+            pointer-events-none
+          "
+        >
+          <div className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto text-xs`}>
+            <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Select by Name</div>
             <select
               className={ui.input}
               value={selectedName}
-              onChange={(e) => {
-                if (e.target.value) applySelectByName(e.target.value);
-                else clearFilters();
-              }}
+              onChange={(e) => (e.target.value ? applySelectByName(e.target.value) : clearFilters())}
             >
               <option value="">—</option>
-              {(lifecycleMode === "none" ? nodes : nodes.filter(n => activeNodeIds.has(n.NameID))).map((n) => (
-                <option key={n.NameID} value={n.Name}>
-                  {n.Name}
-                </option>
+              {(lifecycleMode === "none" ? nodes : nodes.filter((n) => activeNodeIds.has(n.NameID))).map((n) => (
+                <option key={n.NameID} value={n.Name}>{n.Name}</option>
               ))}
             </select>
           </div>
 
-          <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Filter the graph by group/family (keeps group nodes, their outgoing edges, and the destination nodes).">
-            <div className={ui.panelTitle}>Select by Group</div>
+          <div className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto text-xs`}>
+            <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Select by Group</div>
             <select
               className={ui.input}
               value={selectedGroup}
-              onChange={(e) => {
-                const val = e.target.value;
-                if (val) applySelectByGroup(val);
-                else clearFilters();
-              }}
+              onChange={(e) => (e.target.value ? applySelectByGroup(e.target.value) : clearFilters())}
             >
               <option value="">—</option>
-              {(() => {
-                if (lifecycleMode === "none") {
-                  // All groups, in fixed family order
-                  return orderedFamilies;
-                }
-
-                // Only families actually present in the active subgraph, but still ordered
-                const activeBase = Array.from(
-                  new Set(
-                    nodes
-                      .filter((n) => activeNodeIds.has(n.NameID))
-                      .map((n) => canonFam(n.Family))
-                  )
-                );
-
-                const orderedActive = [
-                  ...FAMILY_ORDER.filter((f) => activeBase.includes(f)),
-                  ...activeBase.filter((f) => !FAMILY_ORDER.includes(f)),
-                ];
-
-                return orderedActive;
-              })().map((g) => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
+              {(lifecycleMode === "none" ? groups : visibleFamilies).map((g) => (
+                <option key={g} value={g}>{g}</option>
               ))}
             </select>
           </div>
 
-          <div className={`rounded-lg p-3 shadow ${ui.panel}`} title="Legend — click a family to filter (same as Select by Group).">
-            <div className={ui.panelTitle}>Legend</div>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {(() => {
-                if (lifecycleMode === "none") {
-                  // Use orderedFamilies when showing the full graph
-                  return orderedFamilies;
-                }
-
-                // Only families present in the active subgraph, ordered
-                const activeBase = Array.from(
-                  new Set(
-                    nodes
-                      .filter((n) => activeNodeIds.has(n.NameID))
-                      .map((n) => canonFam(n.Family))
-                  )
-                );
-
-                const orderedActive = [
-                  ...FAMILY_ORDER.filter((f) => activeBase.includes(f)),
-                  ...activeBase.filter((f) => !FAMILY_ORDER.includes(f)),
-                ];
-
-                return orderedActive;
-                })().map((fam) => {
+          {/* Legend gets remaining height */}
+          <div
+            ref={legendPanelRef}
+            className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto text-xs flex-1 min-h-0 overflow-hidden`}
+          >
+            <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Legend</div>
+            <div className="h-full overflow-auto">
+              <div className="flex flex-wrap gap-2 justify-center">
+                {(lifecycleMode === "none" ? groups : visibleFamilies).map((fam) => {
                   const active = filterMode === "group" && selectedGroup === fam;
                   return (
                     <button
@@ -2167,62 +2411,80 @@ export default function App() {
                       onClick={() => toggleLegendFamily(fam)}
                       className={`${ui.chipBase} ${active ? ui.chipActive : ui.chipInactive}`}
                       title={`Filter by ${fam}`}
-                      aria-label={`Filter by ${fam}`}
                     >
                       {fam}
                     </button>
                   );
                 })}
-              <button
-                onClick={clearFilters}
-                className={`${ui.chipBase} ${ui.chipActive}`}
-                title="Clear all filters and restore defaults"
-                aria-label="Clear filters"
-              >
-                Clear Filters
+
+                <button
+                  onClick={clearFilters}
+                  className={`${ui.chipBase} ${ui.chipActive}`}
+                  title="Clear all filters and restore defaults"
+                >
+                  Clear Filters
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Zoom — wider, sticks out LEFT */}
+          <div
+            ref={zoomPanelRef}
+            className={`
+              ${ui.panel} rounded-lg p-3 shadow pointer-events-auto self-end mt-auto
+              w-[clamp(280px,24vw,420px)]
+            `}
+          >
+            <div className="text-xs font-semibold mb-2" style={{ opacity: 0.9 }}>
+              Label Size, Zoom and Guide
+            </div>
+
+            <div className="flex items-center gap-2 mb-2 w-full">
+              <label className={ui.panelTitle} style={{ margin: 0, minWidth: 72 }}>
+                Label size
+              </label>
+
+              <input
+                type="range"
+                min={9}
+                max={22}
+                step={1}
+                value={fontPx}
+                onChange={(e) => setFontPx(parseInt(e.target.value, 10))}
+                className="flex-1"
+              />
+
+              <span className={isDark ? "text-xs text-neutral-300" : "text-xs text-gray-600"}>
+                {fontPx}px
+              </span>
+            </div>
+
+            <div className="grid grid-cols-4 gap-2 w-full">
+              <HoldButton className={`px-2 py-2 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomIn(1.01))} title="Zoom in">
+                ＋
+              </HoldButton>
+
+              <HoldButton className={`px-2 py-2 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomOut(1.01))} title="Zoom out">
+                －
+              </HoldButton>
+
+              <button className={`px-2 py-2 ${ui.btnPill} w-full`} onClick={fitUsable} title="Fit graph into usable area">
+                Fit
+              </button>
+
+              <button className={`px-2 py-2 ${ui.btnPill} w-full`} onClick={() => setShowGuide(true)} title="Open guide">
+                ?
               </button>
             </div>
           </div>
         </div>
-
-        {/* Family Boxes (left-middle) */}
-        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-0 w-[min(280px,26vw)] md:w-[14vw] max-h-[70vh] overflow-y-auto space-y-3 pointer-events-none">
-          {orderedFamilies.map((fam) => {
-            const meta = FAMILY_META[fam] || { main: fam };
-            const colors = makeColorForFamily(fam);
-            const names = (nodesByFamily.get(fam) || []).map((n) => n.Name);
-
-            return (
-              <div
-                key={fam}
-                className="rounded-lg p-3 border-2 shadow-sm pointer-events-auto"
-                style={{
-                  background: colors.background,
-                  borderColor: colors.border,
-                }}
-              >
-                <div className="text-sm md:text-base font-semibold" style={{ color: "#111" }}>
-                  {meta.main}
-                </div>
-                <div
-                  className="border-t-4 mb-2"
-                  style={{ borderColor: colors.border }}
-                />
-                <div className="text-xs md:text-sm leading-snug" style={{ color: "#111" }}>
-                  {names.length ? names.join(", ") : "—"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
 
         {/* Graph canvas */}
         <div ref={containerRef} className="w-full h-[calc(100vh-0px)]" />
       </section>
     </div>
   );
-
 }
 
 /** Small hold-to-repeat button helper using the global controller */
@@ -2252,5 +2514,123 @@ function HoldButton({
     >
       {children}
     </button>
+  );
+}
+
+function GuideOverlay({
+  open,
+  isDark,
+  onClose,
+  onStart,
+  onLoadExample,
+  hasExamples,
+}: {
+  open: boolean;
+  isDark: boolean;
+  onClose: () => void;
+  onStart: () => void;
+  onLoadExample: () => void;
+  hasExamples: boolean;
+}) {
+  if (!open) return null;
+
+  const panel = isDark
+    ? "bg-neutral-900/95 text-white border border-neutral-700"
+    : "bg-white/95 text-black border border-neutral-200";
+
+  const subtle = isDark ? "text-neutral-300" : "text-neutral-600";
+  const btn = isDark
+    ? "rounded-md bg-black text-white border border-neutral-700 hover:opacity-90"
+    : "rounded-md bg-white text-black border border-neutral-300 hover:bg-neutral-50";
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center px-4"
+      aria-modal="true"
+      role="dialog"
+    >
+      {/* light dim, non-threatening */}
+      <div
+        className="absolute inset-0 bg-black/20"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+
+      <div
+        className={`relative w-full max-w-[720px] rounded-xl shadow-xl ${panel}`}
+        style={{
+          // responsive scale so it stays usable on smaller screens
+          // (keeps “same vibe” across aspect ratios)
+          transform: "scale(clamp(0.85, 1vw + 0.8, 1))",
+          transformOrigin: "center",
+        }}
+      >
+        <div className="p-5 sm:p-6">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xl font-semibold">Lifecycle Builder</div>
+              <div className={`mt-1 text-sm ${subtle}`}>
+                Quick start guide
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className={`h-9 w-9 rounded-md ${btn} flex items-center justify-center leading-none`}
+              aria-label="Close guide"
+              title="Close"
+            >
+              <span className="text-lg leading-none">✕</span>
+            </button>
+          </div>
+
+          <div className="mt-4 space-y-4 text-sm leading-relaxed">
+            <div>
+              <div className="font-semibold">What this tool does</div>
+              <div className={subtle}>
+                Build a data & information lifecycle by selecting edges between nodes,
+                validate it, and export a reusable artifact.
+              </div>
+            </div>
+
+            <div>
+              <div className="font-semibold">How to use it</div>
+              <ul className={`mt-1 list-disc pl-5 ${subtle}`}>
+                <li>Start from <b>Specify needs</b> and choose outgoing edges to build your lifecycle.</li>
+                <li>Use <b>Validate</b> to check rules (Dispose reachable, valid endpoints, etc.).</li>
+                <li><b>Download Lifecycle (XLSX)</b> produces a file you can share or reload later.</li>
+              </ul>
+            </div>
+
+            <div>
+              <div className="font-semibold">Start options</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button type="button" className={`px-3 py-2 ${btn}`} onClick={onStart}>
+                  Start Building
+                </button>
+
+                <button
+                  type="button"
+                  className={`px-3 py-2 ${btn} disabled:opacity-50`}
+                  onClick={onLoadExample}
+                  disabled={!hasExamples}
+                  title={hasExamples ? "Load an example lifecycle" : "No examples found"}
+                >
+                  Load Example in Tool
+                </button>
+
+                <button type="button" className={`px-3 py-2 ${btn}`} onClick={onClose}>
+                  Continue to Tool
+                </button>
+              </div>
+              <div className={`mt-2 text-xs ${subtle}`}>
+                Tip: You can reopen this guide anytime using the <b>?</b> button in the bottom-right.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
