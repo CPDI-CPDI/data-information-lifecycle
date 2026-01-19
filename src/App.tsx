@@ -1246,7 +1246,7 @@ export default function App() {
     const graphRatio = graphW / graphH;
 
     // Your 0.85 "breathing room" rule + ratio branch
-    const fill = 0.85;
+    const fill = 0.89;
 
     let scale: number;
     if (graphRatio >= limRatio) {
@@ -2215,8 +2215,8 @@ export default function App() {
         {/* LEFT COLUMN (Export + Group Boxes + View) */}
         <div
           className="
-            absolute left-1 top-3 bottom-3 z-30
-            w-[clamp(230px,18vw,320px)]
+            absolute left-1 top-1 bottom-1 z-30
+            w-[clamp(200px,14vw,320px)]
             flex flex-col gap-2
             pointer-events-none
           "
@@ -2226,10 +2226,10 @@ export default function App() {
             ref={exportPanelRef}
             className={`
               ${ui.panel} rounded-lg shadow pointer-events-auto
-              w-[clamp(420px,44vw,500px)]
+              w-[clamp(340px,26vw,500px)]
             `}
           >
-            <div className="px-3 pt-3 pb-2">
+            <div className="px-2 pt-2 pb-2">
               <div className={ui.panelTitle} style={{ fontSize: "clamp(10px, 0.75vw, 12px)" }}>
                 Save & Export
               </div>
@@ -2239,7 +2239,7 @@ export default function App() {
                 className={isDark ? "text-neutral-300" : "text-gray-600"}
                 style={{
                   fontSize: "clamp(9px, 0.68vw, 11px)",
-                  whiteSpace: "nowrap",
+                  whiteSpace: "wrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   lineHeight: 1.15,
@@ -2307,7 +2307,7 @@ export default function App() {
           {/* Groups — SAME WIDTH AS COLUMN, takes ALL remaining height */}
           <div
             ref={familyPanelRef}
-            className={`${ui.panel} rounded-lg shadow pointer-events-auto flex-1 min-h-0 overflow-hidden px-2 py-4 flex flex-col`}
+            className={`${ui.panel} rounded-lg shadow pointer-events-auto flex-1 min-h-0 overflow-hidden px-0 py-2 flex flex-col`}
             style={{ scrollbarGutter: "stable both-edges" }}
           >
             <div className={ui.panelTitle}>Groups</div>
@@ -2344,7 +2344,7 @@ export default function App() {
           <div
             ref={viewPanelRef}
             className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto mt-auto`}
-            style={{ width: "clamp(200px, 14vw, 260px)" }}
+            style={{ width: "clamp(200px,14vw,320px)" }}
           >
             <div className={ui.panelTitle}>View</div>
             <div className="grid grid-cols-3 gap-1">
@@ -2361,13 +2361,13 @@ export default function App() {
         {/* RIGHT COLUMN (Select / Legend / Zoom) */}
         <div
           className="
-            absolute right-3 top-3 bottom-3 z-20
-            w-[min(165px,calc(100vw-48px))]
+            absolute right-1 top-1 bottom-1 z-20
+            w-[min(150px,calc(100vw-48px))]
             flex flex-col gap-2
             pointer-events-none
           "
         >
-          <div className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto text-xs`}>
+          <div className={`${ui.panel} rounded-lg p-2 shadow pointer-events-auto text-xs`}>
             <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Select by Name</div>
             <select
               className={ui.input}
@@ -2381,7 +2381,7 @@ export default function App() {
             </select>
           </div>
 
-          <div className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto text-xs`}>
+          <div className={`${ui.panel} rounded-lg p-2 shadow pointer-events-auto text-xs`}>
             <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Select by Group</div>
             <select
               className={ui.input}
@@ -2398,7 +2398,7 @@ export default function App() {
           {/* Legend gets remaining height */}
           <div
             ref={legendPanelRef}
-            className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto text-xs flex-1 min-h-0 overflow-hidden`}
+            className={`${ui.panel} rounded-lg p-2 shadow pointer-events-auto text-xs flex-1 min-h-0 overflow-hidden`}
           >
             <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Legend</div>
             <div className="h-full overflow-auto">
@@ -2433,7 +2433,7 @@ export default function App() {
             ref={zoomPanelRef}
             className={`
               ${ui.panel} rounded-lg p-3 shadow pointer-events-auto self-end mt-auto
-              w-[clamp(280px,24vw,420px)]
+              w-[clamp(260px,21vw,420px)]
             `}
           >
             <div className="text-xs font-semibold mb-2" style={{ opacity: 0.9 }}>
@@ -2460,20 +2460,20 @@ export default function App() {
               </span>
             </div>
 
-            <div className="grid grid-cols-4 gap-2 w-full">
-              <HoldButton className={`px-2 py-2 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomIn(1.01))} title="Zoom in">
+            <div className="grid grid-cols-4 gap-1 w-full">
+              <HoldButton className={`px-1 py-1 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomIn(1.01))} title="Zoom in">
                 ＋
               </HoldButton>
 
-              <HoldButton className={`px-2 py-2 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomOut(1.01))} title="Zoom out">
+              <HoldButton className={`px-1 py-1 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomOut(1.01))} title="Zoom out">
                 －
               </HoldButton>
 
-              <button className={`px-2 py-2 ${ui.btnPill} w-full`} onClick={fitUsable} title="Fit graph into usable area">
+              <button className={`px-1 py-1 ${ui.btnPill} w-full`} onClick={fitUsable} title="Fit graph into usable area">
                 Fit
               </button>
 
-              <button className={`px-2 py-2 ${ui.btnPill} w-full`} onClick={() => setShowGuide(true)} title="Open guide">
+              <button className={`px-1 py-1 ${ui.btnPill} w-full`} onClick={() => setShowGuide(true)} title="Open guide">
                 ?
               </button>
             </div>
