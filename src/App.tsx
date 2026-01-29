@@ -3,6 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as Papa from "papaparse";
 import * as XLSX from "xlsx";
 
+import GuideOverlay from "./components/GuideOverlay";
+import MicroGuideOverlay, { type MicroGuideKey } from "./components/MicroGuideOverlay";
+
 // IMPORTANT: type-only imports for vis-network types
 import type { Node as VisNode, Edge as VisEdge } from "vis-network";
 import { Network } from "vis-network";
@@ -78,9 +81,6 @@ const ANCHORS: Record<string, { r: number; c: number }> = {
 };
 
 const padLabel = (s: string) => `\u2007${s}\u2007`; // thin padding around labels
-
-const GUIDE_VER = "v1"; // bump this to force the guide to re-open for everyone
-const GUIDE_LS_KEY = `lifecycle_builder_guide_dismissed_${GUIDE_VER}`;
 
 // ── THEME HELPERS ─────────────────────────────────────────────
 function usePrefersDark() {
@@ -376,16 +376,6 @@ function makeColorForFamily(
   const { bg, border, hiBg, hiBorder } = shadeFor(hue, tier);
   return { border, background: bg, highlight: { border: hiBorder, background: hiBg } };
 }
-
-// 3-word associations per family
-const FAMILY_META: Record<string, { main: string }> = {
-  INITIATION: { main: "INITIATION" },
-  ACQUISITION: { main: "ACQUISITION" },
-  CONFIGURATION: { main: "CONFIGURATION" },
-  PROCESSING:   { main: "PROCESSING" },
-  LEVERAGING:   { main: "LEVERAGING" },
-  DISPOSITION:  { main: "DISPOSITION" },
-};
 
 const CANON_FAMILY_ORDER = [
   "INITIATION",
@@ -685,17 +675,27 @@ export default function App() {
   const visNodesRef = useRef<DataSet<VisNode> | null>(null);
   const visEdgesRef = useRef<DataSet<VisEdge> | null>(null);
 
-  const exportPanelRef = useRef<HTMLDivElement | null>(null);
-  const familyPanelRef = useRef<HTMLDivElement | null>(null);
-  const viewPanelRef = useRef<HTMLDivElement | null>(null);
-  const legendPanelRef = useRef<HTMLDivElement | null>(null);
-  const zoomPanelRef = useRef<HTMLDivElement | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
 
   // viewport persistence
   const initialFitDoneRef = useRef(false); // only auto-fit once
-  const hasInteractedRef = useRef(false);  // user panned/zoomed
   const viewRef = useRef<{ position: { x: number; y: number }; scale: number } | null>(null);
 
+  type MasterPanelKey = "leftTop" | "leftBottom" | "rightTop" | "rightBottom";
+
+  const [collapsed, setCollapsed] = useState<Record<MasterPanelKey, boolean>>({
+    leftTop: false,
+    leftBottom: false,
+    rightTop: false,
+    rightBottom: false,
+  });
+
+  const leftTopRef = useRef<HTMLDivElement | null>(null);
+  const rightTopRef = useRef<HTMLDivElement | null>(null);
+  const leftBottomRef = useRef<HTMLDivElement | null>(null);
+  const rightBottomRef = useRef<HTMLDivElement | null>(null);
+
+  const [microGuideKey, setMicroGuideKey] = useState<MicroGuideKey | null>(null);
 
   // File inputs
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -734,18 +734,9 @@ export default function App() {
 
   const activeNodeIds = useMemo(() => bfsReachable(startNodeId, activeEdgeKeys), [startNodeId, activeEdgeKeys]);
 
-  const [showGuide, setShowGuide] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(GUIDE_LS_KEY) !== "true";
-    } catch {
-      return true;
-    }
-  });
+  const [showGuide, setShowGuide] = useState(true);
 
   function closeGuide() {
-    try {
-      localStorage.setItem(GUIDE_LS_KEY, "true");
-    } catch {}
     setShowGuide(false);
   }
 
@@ -963,39 +954,168 @@ export default function App() {
       }
     );
 
-    // --- Plain DOM tooltip helpers ---
+    // --- Plain DOM tooltip helpers (with hover intent) ---
     const tipElRef = { current: null as HTMLDivElement | null };
     const moveHandlerRef = { current: null as ((e: MouseEvent) => void) | null };
 
-    const hideTip = () => {
+    // intent timers
+    const showTimerRef = { current: null as any };
+    const hideTimerRef = { current: null as any };
+    const lastEvtRef = { current: null as null | { evt: any; text: string; kind: "node" | "edge" } };
+
+    // controls (tune these)
+    const SHOW_DELAY_MS = 180; // intentional delay before appearing
+    const HIDE_DELAY_MS = 20;  // small grace period to reduce flicker
+
+    // placement tuning
+    const TIP_GAP = 14;          // distance from cursor
+    const TIP_SAFE_PAD = 10;     // keep tooltip inside viewport by this much
+    const TIP_MAX_W = 340;       // max tooltip width
+    const TIP_MAX_H = 220;       // optional cap (helps huge edge tooltips)
+
+    // optional: if you want tooltip to be less “jumpy” when close to edges
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+    function positionTooltipAtPoint(el: HTMLDivElement, clientX: number, clientY: number, extraGap = 0) {
+      // Ensure styles that affect size are set before measuring
+      el.style.maxWidth = `${TIP_MAX_W}px`;
+      el.style.maxHeight = `${TIP_MAX_H}px`;
+      el.style.overflow = "hidden";
+      el.style.textOverflow = "ellipsis";
+
+      // We need dimensions; if not in DOM yet, caller must append first
+      const rect = el.getBoundingClientRect();
+
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      // Default: bottom-right of cursor
+        let x = clientX + TIP_GAP + extraGap;
+        let y = clientY + TIP_GAP + extraGap;
+
+      // Flip horizontally if would overflow right
+      if (x + rect.width + TIP_SAFE_PAD > vw) {
+        x = clientX - (TIP_GAP + extraGap) - rect.width;
+      }
+
+      // Flip vertically if would overflow bottom
+      if (y + rect.height + TIP_SAFE_PAD > vh) {
+        y = clientY - (TIP_GAP + extraGap) - rect.height;
+      }
+
+      // Clamp to viewport
+      x = clamp(x, TIP_SAFE_PAD, vw - rect.width - TIP_SAFE_PAD);
+      y = clamp(y, TIP_SAFE_PAD, vh - rect.height - TIP_SAFE_PAD);
+
+      el.style.left = `${Math.round(x)}px`;
+      el.style.top = `${Math.round(y)}px`;
+    }
+
+    const clearTimers = () => {
+      if (showTimerRef.current) {
+        clearTimeout(showTimerRef.current);
+        showTimerRef.current = null;
+      }
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = null;
+      }
+    };
+
+    const hideTipNow = () => {
       if (moveHandlerRef.current) {
         window.removeEventListener("mousemove", moveHandlerRef.current);
         moveHandlerRef.current = null;
       }
       if (tipElRef.current) {
-        tipElRef.current?.remove();
+        tipElRef.current.remove();
         tipElRef.current = null;
       }
     };
 
-    const showTipFromEvent = (evt: any, text: string) => {
-      hideTip();
-      const el = document.createElement("div");
-      el.className = "pointer-events-none fixed z-[9999] px-2 py-1 rounded bg-black text-white shadow";
-      el.style.whiteSpace = "pre-line";
-      el.style.fontSize = `${Math.max(9, Math.min(22, fontPx))}px`; // use slider size
-      el.textContent = text;
-      tipElRef.current = el;
-      document.body.appendChild(el);
+    const containerEl = containerRef.current;
 
-      const move = (e: MouseEvent) => {
-        el.style.left = e.clientX + 12 + "px";
-        el.style.top = e.clientY + 12 + "px";
-      };
-      move(evt?.srcEvent ?? (evt as any));
-      const onMove = (e: MouseEvent) => move(e);
-      window.addEventListener("mousemove", onMove);
-      moveHandlerRef.current = onMove;
+    const onLeaveContainer = () => hideTipNow();
+
+    // Use both for safety across browsers/input types
+    containerEl?.addEventListener("mouseleave", onLeaveContainer);
+    containerEl?.addEventListener("pointerleave", onLeaveContainer);
+
+    const scheduleHide = () => {
+      // cancel any pending show
+      if (showTimerRef.current) {
+        clearTimeout(showTimerRef.current);
+        showTimerRef.current = null;
+      }
+      // schedule hide (grace)
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = setTimeout(() => {
+        hideTimerRef.current = null;
+        hideTipNow();
+      }, HIDE_DELAY_MS);
+    };
+
+    const showTipNow = (evt: any, text: string) => {
+      // if already showing, just update content + position
+      if (!tipElRef.current) {
+        const el = document.createElement("div");
+        el.className =
+          "pointer-events-none fixed z-[9999] px-2 py-1 rounded bg-black text-white shadow";
+        el.style.whiteSpace = "pre-line";
+        el.style.maxWidth = `${TIP_MAX_W}px`;
+        el.style.fontSize = `${Math.max(9, Math.min(22, fontPx))}px`;
+        el.style.lineHeight = "1.2";
+        el.style.borderRadius = "8px";
+
+        tipElRef.current = el;
+        document.body.appendChild(el);
+
+        // mouse follower (only while visible)
+        let raf = 0;
+        const onMove = (e: MouseEvent) => {
+          cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(() => {
+            if (!tipElRef.current) return;
+            const kind = lastEvtRef.current?.kind ?? "node";
+            const extraGap = kind === "node" ? 10 : 0;
+            positionTooltipAtPoint(tipElRef.current, e.clientX, e.clientY, extraGap);
+          });
+        };
+
+        window.addEventListener("mousemove", onMove);
+        moveHandlerRef.current = onMove;
+      }
+
+      // update text first so size is accurate
+      tipElRef.current.textContent = text;
+
+      // place immediately from triggering event
+      const src = evt?.srcEvent ?? evt;
+      if (src?.clientX != null && src?.clientY != null && tipElRef.current) {
+        // after textContent update, compute correct rect and place
+        const kind = lastEvtRef.current?.kind ?? "node";
+        const extraGap = kind === "node" ? 10 : 0;
+        positionTooltipAtPoint(tipElRef.current, src.clientX, src.clientY, extraGap);
+      }
+    };
+
+    const scheduleShow = (evt: any, text: string, kind: "node" | "edge") => {
+      if (!text) return;
+
+      if (hideTimerRef.current) {
+        clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = null;
+      }
+
+      lastEvtRef.current = { evt, text, kind };
+
+      if (showTimerRef.current) clearTimeout(showTimerRef.current);
+      showTimerRef.current = setTimeout(() => {
+        showTimerRef.current = null;
+        const last = lastEvtRef.current;
+        if (!last) return;
+        showTipNow(last.evt, last.text);
+      }, SHOW_DELAY_MS);
     };
 
     // Node tooltips
@@ -1004,37 +1124,30 @@ export default function App() {
       const name = (item && item.label) || nodeById[String(params.node)]?.Name || "";
       const desc = (item && item.title) ? String(item.title) : "";
       const text = name && desc ? `${name}: ${desc}` : (name || desc || "");
-      if (text) showTipFromEvent(params.event, text);
+      scheduleShow(params.event, text, "node");
     });
-    net.on("blurNode", () => hideTip());
+    net.on("blurNode", () => scheduleHide());
 
     // Edge tooltips
     net.on("hoverEdge", (params: any) => {
       const item = visEdgesRef.current!.get(params.edge) as any;
       const text = (item && item.title) ? String(item.title) : "";
-      if (text) showTipFromEvent(params.event, text);
+      scheduleShow(params.event, text, "edge");
     });
-    net.on("blurEdge", () => hideTip());
+    net.on("blurEdge", () => scheduleHide());
 
     // Hide while interacting
-    net.on("dragStart", hideTip);
-    net.on("zoom", hideTip);
-    net.on("dragEnd", hideTip);
-
-    net.on("dragStart", () => { hasInteractedRef.current = true; });
-    net.on("zoom", () => { hasInteractedRef.current = true; });
-
-    // also keep viewRef fresh while user moves
-    net.on("dragEnd", () => {
-      try {
-        const pos = net.getViewPosition?.();
-        const scale = net.getScale?.();
-        if (pos && typeof scale === "number") {
-          viewRef.current = { position: pos, scale };
-        }
-      } catch {}
+    net.on("dragStart", () => {
+      clearTimers();
+      hideTipNow();
     });
-
+    net.on("zoom", () => {
+      clearTimers();
+      hideTipNow();
+    });
+    net.on("dragEnd", () => {
+      // optional: keep hidden after drag; if you want tooltips back instantly, do nothing here
+    });
     net.setOptions({
       nodes: { labelHighlightBold: true },
       interaction: { hover: true, tooltipDelay: 0 }
@@ -1064,8 +1177,11 @@ export default function App() {
         }
       } catch {}
 
-      hideTip();
+      clearTimers();
+      hideTipNow();
       net.destroy();
+      containerEl?.removeEventListener("mouseleave", onLeaveContainer);
+      containerEl?.removeEventListener("pointerleave", onLeaveContainer);
       networkRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1173,10 +1289,6 @@ export default function App() {
     markDirty();
   }
 
-  function toggleLegendFamily(fam: string) {
-    applySelectByGroup(fam);
-  }
-
   // -----------------------------
   // Graph controls
   // -----------------------------
@@ -1191,25 +1303,79 @@ export default function App() {
     const container = containerRef.current;
     if (!net || !container) return;
 
-    // --- DOM limiting box (px), inside the vis container ---
     const containerRect = container.getBoundingClientRect();
 
-    const exportRect = exportPanelRef.current?.getBoundingClientRect();
-    const groupsRect = familyPanelRef.current?.getBoundingClientRect();
-    const legendRect = legendPanelRef.current?.getBoundingClientRect();
-    const zoomRect = zoomPanelRef.current?.getBoundingClientRect();
+    const lt = leftTopRef.current?.getBoundingClientRect();      // Save/Export/Groups
+    const rt = rightTopRef.current?.getBoundingClientRect();     // Filters
+    const lb = leftBottomRef.current?.getBoundingClientRect();   // View
+    const rb = rightBottomRef.current?.getBoundingClientRect();  // Label/Zoom/Help
 
-    // Limits you specified:
-    // top = bottom of save/export
-    // bottom = top of zoom box
-    // left = right of groups
-    // right = left of legend
     const pad = 12;
 
-    const topPx = (exportRect ? exportRect.bottom : containerRect.top) - containerRect.top + pad;
-    const bottomPx = (zoomRect ? zoomRect.top : containerRect.bottom) - containerRect.top - pad;
-    const leftPx = (groupsRect ? groupsRect.right : containerRect.left) - containerRect.left + pad;
-    const rightPx = (legendRect ? legendRect.left : containerRect.right) - containerRect.left - pad;
+    const leftTopCollapsed = !!collapsed.leftTop;
+    const rightBothCollapsed = !!collapsed.rightTop && !!collapsed.rightBottom; // only case we treat as collapsed
+
+    // Helpers: abs -> container local px
+    const toLocalX = (absX: number) => absX - containerRect.left;
+    const toLocalY = (absY: number) => absY - containerRect.top;
+
+    // Your naming:
+    // max y = top boundary (smaller number on screen)
+    // min y = bottom boundary (larger number on screen)
+
+    let topAbs = containerRect.top;
+    let bottomAbs = containerRect.bottom;
+    let leftAbs = (lt?.right ?? containerRect.left);
+    let rightAbs = (rt?.left ?? containerRect.right);
+
+    // CASE 1: neither collapsed (default)
+    // top = top of page, bottom = bottom of page
+    // left = right of left column, right = left of right column
+    if (!leftTopCollapsed && !rightBothCollapsed) {
+      topAbs = containerRect.top;
+      bottomAbs = containerRect.bottom;
+      leftAbs = (lt?.right ?? containerRect.left);
+      rightAbs = (rt?.left ?? containerRect.right);
+    }
+
+    // CASE 2: left top collapsed only
+    // top = bottom of groupexport (leftTop)
+    // bottom = top of view (leftBottom)
+    // left = left of canvas, right = left of right column
+    else if (leftTopCollapsed && !rightBothCollapsed) {
+      topAbs = (lt?.bottom ?? containerRect.top);
+      bottomAbs = (lb?.top ?? containerRect.bottom);
+      leftAbs = containerRect.left;
+      rightAbs = (rt?.left ?? containerRect.right);
+    }
+
+    // CASE 3: BOTH RIGHT PANELS COLLAPSED only
+    // top = bottom of filter (rightTop)
+    // bottom = top of labelzoom (rightBottom)
+    // left = right of left column, right = right of canvas
+    else if (!leftTopCollapsed && rightBothCollapsed) {
+      topAbs = (rt?.bottom ?? containerRect.top);
+      bottomAbs = (rb?.top ?? containerRect.bottom);
+      leftAbs = (lt?.right ?? containerRect.left);
+      rightAbs = containerRect.right;
+    }
+
+    // CASE 4: left top collapsed AND both right collapsed
+    // top = bottom of filter
+    // bottom = top of view
+    // left = left of canvas, right = right of canvas
+    else {
+      topAbs = (rt?.bottom ?? containerRect.top);
+      bottomAbs = (rb?.top ?? containerRect.bottom);
+      leftAbs = containerRect.left;
+      rightAbs = containerRect.right;
+    }
+
+    // Convert usable rect to container-local px
+    const topPx = toLocalY(topAbs) + pad;
+    const bottomPx = toLocalY(bottomAbs) - pad;
+    const leftPx = toLocalX(leftAbs) + pad;
+    const rightPx = toLocalX(rightAbs) - pad;
 
     const limW = Math.max(50, rightPx - leftPx);
     const limH = Math.max(50, bottomPx - topPx);
@@ -1217,54 +1383,39 @@ export default function App() {
     const limCenterX = leftPx + limW / 2;
     const limCenterY = topPx + limH / 2;
 
-    // --- Graph "box" in network coords using anchors ---
-    // Top-left: Specify needs (center)
-    // Right-most: Share (center)
-    // Bottom-most: Dispose (center)
+    // Bounds from visible nodes (better Y-centering than anchors)
     const positions = computeFixedHexPositions(nodes);
 
-    const specifyId = startNodeId; // already computed for "specify needs"
-    const shareNodeId = shareId;   // already computed for "share"
-    const disposeNodeId = disposeId; // already computed for "dispose"
+    const visibleNodeIds =
+      lifecycleMode === "none"
+        ? nodes.map(n => n.NameID)
+        : nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => n.NameID);
 
-    const pSpec = positions[specifyId];
-    const pShare = positions[shareNodeId];
-    const pDisp = positions[disposeNodeId];
-
-    if (!pSpec || !pShare || !pDisp) return;
-
-    // Base graph box (network units)
-    const gLeft = pSpec.x;
-    const gTop = pSpec.y;
-    const gRight = pShare.x;
-    const gBottom = pDisp.y;
-
-    const graphW = Math.max(1, gRight - gLeft);
-    const graphH = Math.max(1, gBottom - gTop);
-
-    const limRatio = limW / limH;
-    const graphRatio = graphW / graphH;
-
-    // Your 0.85 "breathing room" rule + ratio branch
-    const fill = 0.89;
-
-    let scale: number;
-    if (graphRatio >= limRatio) {
-      // graph is "wider" (more length per height) -> fit width
-      scale = (limW * fill) / graphW;
-    } else {
-      // graph is "taller" -> fit height
-      scale = (limH * fill) / graphH;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of visibleNodeIds) {
+      const p = positions[id];
+      if (!p) continue;
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
     }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
 
-    // Center of the graph box in network coords
-    const graphCenter = {
-      x: (gLeft + gRight) / 2,
-      y: (gTop + gBottom) / 2,
-    };
+    // a bit of padding in graph coords so labels feel safe
+    const G_PAD = 30;
+    minX -= G_PAD; maxX += G_PAD;
+    minY -= G_PAD; maxY += G_PAD;
 
-    // net.moveTo uses "position = network coords at canvas center".
-    // We want the *graph center* to appear at limCenter (px) inside container.
+    const graphW = Math.max(1, maxX - minX);
+    const graphH = Math.max(1, maxY - minY);
+
+    const fill = 0.9;
+    const scale = Math.min((limW * fill) / graphW, (limH * fill) / graphH);
+
+    const graphCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+
+    // Align graphCenter to usable center
     const containerCenterX = containerRect.width / 2;
     const containerCenterY = containerRect.height / 2;
 
@@ -1282,6 +1433,8 @@ export default function App() {
       animation: { duration: 250, easingFunction: "easeInOutQuad" },
     });
   }
+
+
 
   function pan(dx: number, dy: number) {
     const p = networkRef.current?.getViewPosition();
@@ -1515,17 +1668,6 @@ export default function App() {
       alert("Could not copy link. Your browser may block clipboard access.");
     }
   }
-
-  const nodesByFamily = useMemo(() => {
-    const map = new Map<string, NodeRow[]>();
-    for (const n of nodes) {
-      const fam = canonFam(n.Family);
-      if (!map.has(fam)) map.set(fam, []);
-      map.get(fam)!.push({ ...n, Family: fam });
-    }
-    for (const [, arr] of map) arr.sort((a, b) => a.Name.localeCompare(b.Name));
-    return map;
-  }, [nodes]);
 
   // -----------------------------
   // LIFECYCLE HELPERS
@@ -2198,287 +2340,326 @@ export default function App() {
       {/* Right Pane */}
       <section className="relative">
         <GuideOverlay
-          open={showGuide}
+          open={guideOpen || showGuide}
           isDark={isDark}
-          onClose={closeGuide}
+          onClose={() => {
+            closeGuide();     // keeps your LS behavior
+            setGuideOpen(false);
+          }}
           onStart={() => {
             closeGuide();
+            setGuideOpen(false);
             startLifecycleCreate();
           }}
-          onLoadExample={() => {
+          hasExamples={exampleFiles.length > 0}
+          exampleNames={exampleFiles.map(e => e.name)}
+          selectedExample={selectedExample}
+          onChangeSelectedExample={setSelectedExample}
+          onStartWithExample={() => {
             closeGuide();
+            setGuideOpen(false);
             if (selectedExample) loadExampleByName(selectedExample);
           }}
-          hasExamples={exampleFiles.length > 0}
         />
 
-        {/* LEFT COLUMN (Export + Group Boxes + View) */}
+        {/* LEFT COLUMN */}
         <div
           className="
-            absolute left-1 top-1 bottom-1 z-30
-            w-[clamp(200px,14vw,320px)]
+            absolute left-3 top-3 bottom-3 z-30
+            w-[clamp(230px,18vw,320px)]
             flex flex-col gap-2
             pointer-events-none
           "
         >
-          {/* Export — sticks out RIGHT + longer */}
+          {/* LEFT TOP MASTER: Save/Export/Groups */}
           <div
-            ref={exportPanelRef}
-            className={`
-              ${ui.panel} rounded-lg shadow pointer-events-auto
-              w-[clamp(340px,26vw,500px)]
-            `}
+            ref={leftTopRef}
+            className={`${ui.panel} rounded-lg shadow pointer-events-auto overflow-hidden ${
+              collapsed.leftTop ? "shrink-0" : "flex flex-col flex-1 min-h-0"
+            }`}
           >
-            <div className="px-2 pt-2 pb-2">
-              <div className={ui.panelTitle} style={{ fontSize: "clamp(10px, 0.75vw, 12px)" }}>
-                Save & Export
-              </div>
+            <PanelHeader
+              title="Save, Export & Groups"
+              isCollapsed={collapsed.leftTop}
+              onHelp={() => setMicroGuideKey("exportGroups")}
+              onToggleCollapse={() => setCollapsed(p => ({ ...p, leftTop: !p.leftTop }))}
+              isDark={isDark}
+            />
 
-              {/* one-line blurb */}
-              <div
-                className={isDark ? "text-neutral-300" : "text-gray-600"}
-                style={{
-                  fontSize: "clamp(9px, 0.68vw, 11px)",
-                  whiteSpace: "wrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  lineHeight: 1.15,
-                  marginBottom: 8,
-                }}
-              >
-                Progress auto-saves in this browser — use Share Link or Download State (JSON) to continue elsewhere.
-              </div>
+            {!collapsed.leftTop && (
+              <div className="flex-1 min-h-0 px-3 pb-3 overflow-y-auto space-y-2">
+                {/* Save & Export subpanel */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="text-[11px] font-semibold opacity-90 mb-2">Save & Export</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button className={`${ui.btnPill} py-1.5 !text-[12px] leading-tight`} onClick={exportPNG}>PNG</button>
+                    <button className={`${ui.btnPill} py-1.5 !text-[12px] leading-tight`} onClick={exportSVG}>SVG</button>
 
-              {/* 2-col grid for consistent 2 rows; third row for the long button */}
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  className={`px-2 py-1.5 ${ui.btnPill}`}
-                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
-                  onClick={exportPNG}
-                >
-                  Download PNG
-                </button>
-
-                <button
-                  className={`px-2 py-1.5 ${ui.btnPill}`}
-                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
-                  onClick={exportSVG}
-                >
-                  Download SVG
-                </button>
-
-                <button
-                  className={`px-2 py-1.5 ${ui.btnPill}`}
-                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
-                  onClick={exportJSON}
-                >
-                  Download State (JSON)
-                </button>
-
-                {/* SWAPPED: Load State takes this slot now */}
-                <button
-                  className={`px-2 py-1.5 ${ui.btnPill}`}
-                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
-                  onClick={() => importJsonRef.current?.click()}
-                >
-                  Load State (JSON)
-                </button>
-
-                {/* SWAPPED: Save Progress goes to the full-width row */}
-                <button
-                  className={`px-2 py-1.5 ${ui.btnPill} col-span-2`}
-                  style={{ fontSize: "clamp(11px, 0.8vw, 13px)" }}
-                  onClick={copyShareLink}
-                >
-                  Save Progress (Share Link)
-                </button>
-
-                <input
-                  ref={importJsonRef}
-                  className="hidden"
-                  type="file"
-                  accept="application/json"
-                  onChange={(e) => e.target.files && importJSON(e.target.files[0])}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Groups — SAME WIDTH AS COLUMN, takes ALL remaining height */}
-          <div
-            ref={familyPanelRef}
-            className={`${ui.panel} rounded-lg shadow pointer-events-auto flex-1 min-h-0 overflow-hidden px-0 py-2 flex flex-col`}
-            style={{ scrollbarGutter: "stable both-edges" }}
-          >
-            <div className={ui.panelTitle}>Groups</div>
-
-            {/* legend-style scroller */}
-            <div className="flex-1 min-h-0 overflow-auto pr-2 overscroll-contain touch-pan-y pb-6">
-              <div className="flex flex-col gap-2">
-                {(lifecycleMode === "none" ? groups : visibleFamilies).map((fam) => {
-                  const meta = FAMILY_META[fam] || { main: fam };
-                  const colors = makeColorForFamily(fam);
-                  const names = (nodesByFamily.get(fam) || []).map((n) => n.Name);
-
-                  return (
-                    <div
-                      key={fam}
-                      className="rounded-lg border-2 shadow-sm p-2"
-                      style={{ background: colors.background, borderColor: colors.border }}
-                    >
-                      <div className="font-semibold leading-tight" style={{ color: "#111", fontSize: "clamp(11px, 0.85vw, 14px)" }}>
-                        {meta.main}
-                      </div>
-                      <div className="border-t-4 my-1" style={{ borderColor: colors.border }} />
-                      <div className="leading-snug" style={{ color: "#111", fontSize: "clamp(10px, 0.8vw, 13px)" }}>
-                        {names.length ? names.join(", ") : "—"}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          {/* View — SAME WIDTH AS COLUMN */}
-          <div
-            ref={viewPanelRef}
-            className={`${ui.panel} rounded-lg p-3 shadow pointer-events-auto mt-auto`}
-            style={{ width: "clamp(200px,14vw,320px)" }}
-          >
-            <div className={ui.panelTitle}>View</div>
-            <div className="grid grid-cols-3 gap-1">
-              <div />
-              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan up" onHold={() => beginHold(() => pan(0, PAN_STEP))}>↑</HoldButton>
-              <div />
-              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan left" onHold={() => beginHold(() => pan(PAN_STEP, 0))}>←</HoldButton>
-              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan down" onHold={() => beginHold(() => pan(0, -PAN_STEP))}>↓</HoldButton>
-              <HoldButton className={`px-2 py-0.5 ${ui.btnPill}`} title="Pan right" onHold={() => beginHold(() => pan(-PAN_STEP, 0))}>→</HoldButton>
-            </div>
-          </div>
-        </div>
-
-        {/* RIGHT COLUMN (Select / Legend / Zoom) */}
-        <div
-          className="
-            absolute right-1 top-1 bottom-1 z-20
-            w-[min(150px,calc(100vw-48px))]
-            flex flex-col gap-2
-            pointer-events-none
-          "
-        >
-          <div className={`${ui.panel} rounded-lg p-2 shadow pointer-events-auto text-xs`}>
-            <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Select by Name</div>
-            <select
-              className={ui.input}
-              value={selectedName}
-              onChange={(e) => (e.target.value ? applySelectByName(e.target.value) : clearFilters())}
-            >
-              <option value="">—</option>
-              {(lifecycleMode === "none" ? nodes : nodes.filter((n) => activeNodeIds.has(n.NameID))).map((n) => (
-                <option key={n.NameID} value={n.Name}>{n.Name}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className={`${ui.panel} rounded-lg p-2 shadow pointer-events-auto text-xs`}>
-            <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Select by Group</div>
-            <select
-              className={ui.input}
-              value={selectedGroup}
-              onChange={(e) => (e.target.value ? applySelectByGroup(e.target.value) : clearFilters())}
-            >
-              <option value="">—</option>
-              {(lifecycleMode === "none" ? groups : visibleFamilies).map((g) => (
-                <option key={g} value={g}>{g}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Legend gets remaining height */}
-          <div
-            ref={legendPanelRef}
-            className={`${ui.panel} rounded-lg p-2 shadow pointer-events-auto text-xs flex-1 min-h-0 overflow-hidden`}
-          >
-            <div className={ui.panelTitle} style={{ fontSize: "clamp(10px,0.8vw,12px)" }}>Legend</div>
-            <div className="h-full overflow-auto">
-              <div className="flex flex-wrap gap-2 justify-center">
-                {(lifecycleMode === "none" ? groups : visibleFamilies).map((fam) => {
-                  const active = filterMode === "group" && selectedGroup === fam;
-                  return (
-                    <button
-                      key={fam}
-                      onClick={() => toggleLegendFamily(fam)}
-                      className={`${ui.chipBase} ${active ? ui.chipActive : ui.chipInactive}`}
-                      title={`Filter by ${fam}`}
-                    >
-                      {fam}
+                    <button className={`${ui.btnPill} py-1.5 !text-[12px] leading-tight`} onClick={exportJSON}>Download JSON</button>
+                    <button className={`${ui.btnPill} py-1.5 !text-[12px] leading-tight`} onClick={() => importJsonRef.current?.click()}>
+                      Load JSON
                     </button>
-                  );
-                })}
 
-                <button
-                  onClick={clearFilters}
-                  className={`${ui.chipBase} ${ui.chipActive}`}
-                  title="Clear all filters and restore defaults"
-                >
-                  Clear Filters
-                </button>
+                    <button className={`${ui.btnPill} py-1.5 !text-[12px] col-span-2`} onClick={copyShareLink}>
+                      Share Link
+                    </button>
+                  </div>
+
+                  <input
+                    ref={importJsonRef}
+                    type="file"
+                    accept=".json"
+                    className="hidden"
+                    onChange={(e) => e.target.files && importJSON(e.target.files[0])}
+                  />
+                </div>
+
+                {/* Groups visual helper subpanel */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="text-[11px] font-semibold opacity-90 mb-2">Groups</div>
+
+                  <div className="space-y-2">
+                    {(lifecycleMode === "none" ? groups : visibleFamilies).map((fam) => {
+                      const c = makeColorForFamily(fam);
+                      const bg = c.highlight?.background ?? c.background;
+                      const br = c.highlight?.border ?? c.border;
+
+                      const famNodes =
+                        nodes
+                          .filter(n => canonFam(n.Family) === fam)
+                          .map(n => n.Name)
+                          .sort((a, b) => a.localeCompare(b));
+
+                      return (
+                        <div
+                          key={fam}
+                          className="rounded-md p-2"
+                          style={{ background: bg, border: `2px solid ${br}` }}
+                        >
+                          <div className="font-semibold text-sm text-black tracking-wide text-center">
+                            {fam}
+                          </div>
+
+                          <div className="h-[2px] w-full bg-black/35 my-1" />
+
+                          <div className="text-[11px] leading-snug text-black/90 text-center break-words">
+                            {famNodes.join(", ")}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
-          {/* Zoom — wider, sticks out LEFT */}
+          {/* GHOST SPACER: keeps bottom pinned when top collapsed */}
+          {collapsed.leftTop && <div className="flex-1 min-h-0 pointer-events-none" />}
+
+          {/* LEFT BOTTOM MASTER: View */}
           <div
-            ref={zoomPanelRef}
-            className={`
-              ${ui.panel} rounded-lg p-3 shadow pointer-events-auto self-end mt-auto
-              w-[clamp(260px,21vw,420px)]
-            `}
+            ref={leftBottomRef}
+            className={`${ui.panel} rounded-lg shadow pointer-events-auto overflow-hidden shrink-0`}
           >
-            <div className="text-xs font-semibold mb-2" style={{ opacity: 0.9 }}>
-              Label Size, Zoom and Guide
-            </div>
+            <PanelHeader
+              title="View"
+              isCollapsed={collapsed.leftBottom}
+              onHelp={() => setMicroGuideKey("view")}
+              onToggleCollapse={() => setCollapsed(p => ({ ...p, leftBottom: !p.leftBottom }))}
+              isDark={isDark}
+            />
 
-            <div className="flex items-center gap-2 mb-2 w-full">
-              <label className={ui.panelTitle} style={{ margin: 0, minWidth: 72 }}>
-                Label size
-              </label>
+            {!collapsed.leftBottom && (
+              <div className="px-3 pb-3">
+                <div className="grid grid-cols-3 gap-2">
+                  <div />
+                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(0, PAN_STEP)}>↑</HoldButton>
+                  <div />
 
-              <input
-                type="range"
-                min={9}
-                max={22}
-                step={1}
-                value={fontPx}
-                onChange={(e) => setFontPx(parseInt(e.target.value, 10))}
-                className="flex-1"
-              />
-
-              <span className={isDark ? "text-xs text-neutral-300" : "text-xs text-gray-600"}>
-                {fontPx}px
-              </span>
-            </div>
-
-            <div className="grid grid-cols-4 gap-1 w-full">
-              <HoldButton className={`px-1 py-1 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomIn(1.01))} title="Zoom in">
-                ＋
-              </HoldButton>
-
-              <HoldButton className={`px-1 py-1 ${ui.btnPill} w-full`} onHold={() => beginHold(() => zoomOut(1.01))} title="Zoom out">
-                －
-              </HoldButton>
-
-              <button className={`px-1 py-1 ${ui.btnPill} w-full`} onClick={fitUsable} title="Fit graph into usable area">
-                Fit
-              </button>
-
-              <button className={`px-1 py-1 ${ui.btnPill} w-full`} onClick={() => setShowGuide(true)} title="Open guide">
-                ?
-              </button>
-            </div>
+                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(PAN_STEP, 0)}>←</HoldButton>
+                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(0, -PAN_STEP)}>↓</HoldButton>
+                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(-PAN_STEP, 0)}>→</HoldButton>
+                </div>
+              </div>
+            )}
           </div>
         </div>
+
+        {/* RIGHT COLUMN */}
+        <div
+          className="
+            absolute right-3 top-3 bottom-3 z-30
+            w-[clamp(200px,15vw,260px)]
+            flex flex-col gap-2
+            pointer-events-none
+          "
+        >
+          {/* RIGHT TOP MASTER: Filters */}
+          <div
+            ref={rightTopRef}
+            className={`${ui.panel} rounded-lg shadow pointer-events-auto overflow-hidden ${
+              collapsed.rightTop ? "shrink-0" : "flex flex-col flex-1 min-h-0"
+            }`}
+          >
+            <PanelHeader
+              title="Filters"
+              isCollapsed={collapsed.rightTop}
+              isDark={isDark}
+              onHelp={() => setMicroGuideKey("filters")}
+              onClear={clearFilters}
+              onToggleCollapse={() => setCollapsed((p) => ({ ...p, rightTop: !p.rightTop }))}
+            />
+
+
+            {!collapsed.rightTop && (
+              <div className="flex-1 min-h-0 px-3 pb-3 overflow-y-auto space-y-2">
+                {/* Select by Name */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="text-[11px] font-semibold opacity-90 mb-2">Select by Name</div>
+
+                  <select
+                    className={ui.input}
+                    value={selectedName}
+                    onChange={(e) => setSelectedName(e.target.value)}
+                  >
+                    <option value="">Choose a node…</option>
+                    {(lifecycleMode === "none"
+                      ? nodes
+                      : nodes.filter(n => activeNodeIds.has(n.NameID))
+                    )
+                      .slice()
+                      .sort((a, b) => a.Name.localeCompare(b.Name))
+                      .map(n => (
+                        <option key={n.NameID} value={n.Name}>{n.Name}</option>
+                      ))}
+                  </select>
+
+                  <button
+                    className={`${ui.btnPill} w-full mt-2 py-2 text-sm disabled:opacity-50`}
+                    disabled={!selectedName}
+                    onClick={() => applySelectByName(selectedName)}
+                  >
+                    Apply
+                  </button>
+                </div>
+
+                {/* Select by Group */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="text-[11px] font-semibold opacity-90 mb-2">Select by Group</div>
+
+                  <select
+                    className={ui.input}
+                    value={selectedGroup}
+                    onChange={(e) => setSelectedGroup(e.target.value)}
+                  >
+                    <option value="">Choose a group…</option>
+                    {(lifecycleMode === "none" ? groups : visibleFamilies).map(fam => (
+                      <option key={fam} value={fam}>{fam}</option>
+                    ))}
+                  </select>
+
+                  <button
+                    className={`${ui.btnPill} w-full mt-2 py-2 text-sm disabled:opacity-50`}
+                    disabled={!selectedGroup}
+                    onClick={() => applySelectByGroup(selectedGroup)}
+                  >
+                    Apply
+                  </button>
+                </div>
+
+                {/* Legend */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-[11px] font-semibold opacity-90">Legend</div>
+                  </div>
+
+                  <div className="space-y-2">
+                    {(lifecycleMode === "none" ? groups : visibleFamilies).map((fam) => {
+                      const c = makeColorForFamily(fam);
+                      return (
+                        <button
+                          key={fam}
+                          className="w-full rounded-md px-3 py-2 text-sm font-semibold tracking-wide"
+                          style={{ background: c.background, border: `2px solid ${c.border}`, color: "#000" }}
+                          onClick={() => applySelectByGroup(fam)}
+                        >
+                          {fam}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* GHOST SPACER */}
+          {collapsed.rightTop && <div className="flex-1 min-h-0 pointer-events-none" />}
+
+          {/* RIGHT BOTTOM MASTER: Label Size, Zoom & Help */}
+          <div
+            ref={rightBottomRef}
+            className={`${ui.panel} rounded-lg shadow pointer-events-auto overflow-hidden shrink-0`}
+          >
+            <PanelHeader
+              title="Label Size, Zoom & Help"
+              isCollapsed={collapsed.rightBottom}
+              onFit={fitUsable}
+              onHelp={() => setMicroGuideKey("zoom")}
+              onToggleCollapse={() => setCollapsed(p => ({ ...p, rightBottom: !p.rightBottom }))}
+              isDark={isDark}
+            />
+
+            {!collapsed.rightBottom && (
+              <div className="px-3 pb-3 flex flex-col gap-2">
+                {/* Label Size */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="text-[11px] font-semibold opacity-90 mb-2">Label Size</div>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={9}
+                      max={22}
+                      value={fontPx}
+                      onChange={(e) => setFontPx(Number(e.target.value))}
+                      className="w-full"
+                    />
+                    <div className="text-xs opacity-90 w-[42px] text-right">{fontPx}px</div>
+                  </div>
+                </div>
+
+                {/* Zoom */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="text-[11px] font-semibold opacity-90 mb-2">Zoom</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <HoldButton className={`${ui.btnPill} py-2`} onHold={() => zoomOut(1.01)}>-</HoldButton>
+                    <HoldButton className={`${ui.btnPill} py-2`} onHold={() => zoomIn(1.01)}>+</HoldButton>
+                  </div>
+                </div>
+
+                {/* Help (re-open overlays) */}
+                <div className="rounded-md border border-white/10 p-2">
+                  <div className="text-[11px] font-semibold opacity-90 mb-2">Help</div>
+                  <div className="gap-2">
+                    <button className={`${ui.btnPill} py-1.5 text-[11px]`} onClick={() => setShowGuide(true)}>
+                      Open Guide
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {microGuideKey !== null && (
+          <MicroGuideOverlay
+            open={true}
+            isDark={isDark}
+            guideKey={microGuideKey}
+            onClose={() => setMicroGuideKey(null)}
+          />
+        )}
 
         {/* Graph canvas */}
         <div ref={containerRef} className="w-full h-[calc(100vh-0px)]" />
@@ -2517,119 +2698,92 @@ function HoldButton({
   );
 }
 
-function GuideOverlay({
-  open,
+function PanelHeader({
+  title,
+  isCollapsed,
+  onToggleCollapse,
+  onHelp,
+  onFit,
+  onClear,
   isDark,
-  onClose,
-  onStart,
-  onLoadExample,
-  hasExamples,
 }: {
-  open: boolean;
+  title: string;
+  isCollapsed: boolean;
+  onToggleCollapse: () => void;
+  onHelp: () => void;
+  onFit?: () => void;
+  onClear?: () => void;
   isDark: boolean;
-  onClose: () => void;
-  onStart: () => void;
-  onLoadExample: () => void;
-  hasExamples: boolean;
 }) {
-  if (!open) return null;
+  const iconBtn = [
+    "h-7 w-7 rounded-md border flex items-center justify-center select-none",
+    isDark
+      ? "bg-black text-white border-neutral-700 hover:opacity-90"
+      : "bg-white text-black border-neutral-300 hover:bg-neutral-50",
+  ].join(" ");
 
-  const panel = isDark
-    ? "bg-neutral-900/95 text-white border border-neutral-700"
-    : "bg-white/95 text-black border border-neutral-200";
+  const smallBtn = [
+    "h-7 !px-1 rounded-md border !text-[12px] font-semibold select-none",
+    "flex items-center justify-center",
+    isDark
+      ? "bg-black text-white border-neutral-700 hover:opacity-90"
+      : "bg-white text-black border-neutral-300 hover:bg-neutral-50",
+  ].join(" ");
 
-  const subtle = isDark ? "text-neutral-300" : "text-neutral-600";
-  const btn = isDark
-    ? "rounded-md bg-black text-white border border-neutral-700 hover:opacity-90"
-    : "rounded-md bg-white text-black border border-neutral-300 hover:bg-neutral-50";
+  const stop = (fn: () => void) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  };
 
   return (
-    <div
-      className="fixed inset-0 z-[70] flex items-center justify-center px-4"
-      aria-modal="true"
-      role="dialog"
-    >
-      {/* light dim, non-threatening */}
-      <div
-        className="absolute inset-0 bg-black/20"
-        onClick={onClose}
-        aria-hidden="true"
-      />
+    <div className="flex items-center justify-between gap-2 px-3 py-2">
+      <div className="text-xs font-semibold opacity-90">{title}</div>
 
-      <div
-        className={`relative w-full max-w-[720px] rounded-xl shadow-xl ${panel}`}
-        style={{
-          // responsive scale so it stays usable on smaller screens
-          // (keeps “same vibe” across aspect ratios)
-          transform: "scale(clamp(0.85, 1vw + 0.8, 1))",
-          transformOrigin: "center",
-        }}
-      >
-        <div className="p-5 sm:p-6">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-xl font-semibold">Lifecycle Builder</div>
-              <div className={`mt-1 text-sm ${subtle}`}>
-                Quick start guide
-              </div>
-            </div>
+      <div className="flex items-center gap-2">
+        {onFit && (
+          <button
+            type="button"
+            className={iconBtn}
+            title="Fit"
+            aria-label="Fit"
+            onClick={stop(onFit)}
+          >
+            ⤢
+          </button>
+        )}
 
-            <button
-              type="button"
-              onClick={onClose}
-              className={`h-9 w-9 rounded-md ${btn} flex items-center justify-center leading-none`}
-              aria-label="Close guide"
-              title="Close"
-            >
-              <span className="text-lg leading-none">✕</span>
-            </button>
-          </div>
+        {onClear && (
+          <button
+            type="button"
+            className={smallBtn}
+            title="Clear Filters"
+            aria-label="Clear Filters"
+            onClick={stop(onClear)}
+          >
+            Clear
+          </button>
+        )}
 
-          <div className="mt-4 space-y-4 text-sm leading-relaxed">
-            <div>
-              <div className="font-semibold">What this tool does</div>
-              <div className={subtle}>
-                Build a data & information lifecycle by selecting edges between nodes,
-                validate it, and export a reusable artifact.
-              </div>
-            </div>
+        <button
+          type="button"
+          className={iconBtn}
+          title="Help"
+          aria-label="Help"
+          onClick={stop(onHelp)}
+        >
+          ⓘ
+        </button>
 
-            <div>
-              <div className="font-semibold">How to use it</div>
-              <ul className={`mt-1 list-disc pl-5 ${subtle}`}>
-                <li>Start from <b>Specify needs</b> and choose outgoing edges to build your lifecycle.</li>
-                <li>Use <b>Validate</b> to check rules (Dispose reachable, valid endpoints, etc.).</li>
-                <li><b>Download Lifecycle (XLSX)</b> produces a file you can share or reload later.</li>
-              </ul>
-            </div>
-
-            <div>
-              <div className="font-semibold">Start options</div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button type="button" className={`px-3 py-2 ${btn}`} onClick={onStart}>
-                  Start Building
-                </button>
-
-                <button
-                  type="button"
-                  className={`px-3 py-2 ${btn} disabled:opacity-50`}
-                  onClick={onLoadExample}
-                  disabled={!hasExamples}
-                  title={hasExamples ? "Load an example lifecycle" : "No examples found"}
-                >
-                  Load Example in Tool
-                </button>
-
-                <button type="button" className={`px-3 py-2 ${btn}`} onClick={onClose}>
-                  Continue to Tool
-                </button>
-              </div>
-              <div className={`mt-2 text-xs ${subtle}`}>
-                Tip: You can reopen this guide anytime using the <b>?</b> button in the bottom-right.
-              </div>
-            </div>
-          </div>
-        </div>
+        <button
+          type="button"
+          className={iconBtn}
+          title={isCollapsed ? "Expand" : "Collapse"}
+          aria-label={isCollapsed ? "Expand" : "Collapse"}
+          onClick={stop(onToggleCollapse)}
+        >
+          {isCollapsed ? "▾" : "▴"}
+        </button>
       </div>
     </div>
   );
