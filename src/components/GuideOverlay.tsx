@@ -87,6 +87,12 @@ export default function GuideOverlay(props: GuideOverlayProps) {
                 <li>
                   Use <b>Download</b> or <b>Share Link</b> to save your work.
                 </li>
+                <li>
+                  Use <b>Drag nodes</b> to manually reposition nodes, <b>Reset</b> to restore defaults, and <b>Edge Mode</b> to control edge styling.
+                </li>
+                <li>
+                  <b>Tooltips</b> toggles help text across the whole app (graph + UI).
+                </li>
               </ul>
             </div>
           </div>

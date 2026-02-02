@@ -116,7 +116,9 @@ function makeUiClasses(isDark: boolean) {
     : "rounded-md bg-white text-black border border-neutral-300 hover:bg-neutral-50";
 
   // Legend chips — common base: uniform width + centered text
-  const chipBase = "rounded-full text-sm text-center px-3 py-1 min-w-[140px]";
+  const chipBase =
+  "rounded-full text-[12px] leading-none text-center px-3 py-1 min-w-[140px] " +
+  "truncate whitespace-nowrap overflow-hidden";
 
   // High-contrast per theme
   const chipActive = isDark
@@ -352,7 +354,9 @@ function canonFam(f: string): string {
   return FAMILY_CANON[f] ?? FAMILY_CANON[f.trim()] ?? f;
 }
 
-function hsl(h:number, s:number, l:number) { return `hsl(${h} ${s}% ${l}%)`; }
+function hsl(h: number, s: number, l: number) {
+  return `hsl(${h}, ${s}%, ${l}%)`; // commas = safest for canvas
+}
 
 // Given a tier, pick accessible lightness & slightly darker border
 function shadeFor(hue:number, tier:Tier) {
@@ -554,9 +558,24 @@ function buildVisDatasets(
         node.fixed = { x: true, y: true };
       }
 
-      node.__origColor = node.color;
-      node.__origFont = node.font;
-      node.__origOpacity = 1.0;
+      const baseColor = isActive
+        ? {
+            border: c.border,
+            background: c.background,
+            highlight: { ...c.highlight },
+            hover: { ...c.highlight }, // <-- add this
+          }
+        : {
+            border: "#cccccc",
+            background: "#e5e7eb",
+            highlight: { border: "#a1a1aa", background: "#e5e7eb" },
+            hover: { border: "#a1a1aa", background: "#e5e7eb" },
+          };
+
+      node.color = baseColor;
+      node.__origColor = JSON.parse(JSON.stringify(baseColor)); // <-- clone so vis can't mutate your "original"
+      node.__origFont = JSON.parse(JSON.stringify(node.font));
+
 
       return node as VisNode;
     })
@@ -674,6 +693,7 @@ export default function App() {
   const networkRef = useRef<Network | null>(null);
   const visNodesRef = useRef<DataSet<VisNode> | null>(null);
   const visEdgesRef = useRef<DataSet<VisEdge> | null>(null);
+  const positionsRef = useRef<Record<string, { x: number; y: number }> | null>(null);
 
   const [guideOpen, setGuideOpen] = useState(false);
 
@@ -736,9 +756,76 @@ export default function App() {
 
   const [showGuide, setShowGuide] = useState(true);
 
+  type EdgeMode = "default" | "straight" | "curved";
+
+  const [dragNodes, setDragNodes] = useState<boolean>(false);
+  const [tooltipsOn, setTooltipsOn] = useState<boolean>(true);
+  const [edgeMode, setEdgeMode] = useState<EdgeMode>("default");
+
+  const tooltipHideRef = useRef<null | (() => void)>(null);
+  const tooltipClearTimersRef = useRef<null | (() => void)>(null);
+
+  const uiTitle = (s: string) => (tooltipsOn ? s : undefined);
+
+  // This ref lets your tooltip handlers check the latest value without re-binding events.
+  const tooltipsOnRef = useRef(true);
+  useEffect(() => {
+    tooltipsOnRef.current = tooltipsOn;
+    // if tooltips turned off, ensure any currently visible tooltip disappears
+    tooltipHideRef.current?.();
+    tooltipClearTimersRef.current?.();
+  }, [tooltipsOn]);
+
+  const fontPxRef = useRef<number>(fontPx);
+  useEffect(() => {
+    fontPxRef.current = fontPx;
+  }, [fontPx]);
+
   function closeGuide() {
     setShowGuide(false);
   }
+
+  function applyEdgeMode(
+    visEdges: DataSet<VisEdge>,
+    positions: Record<string, { x: number; y: number }>,
+    mode: EdgeMode
+  ) {
+    const edges = visEdges.get();
+    const updates: Array<Partial<VisEdge> & { id: string | number }> = [];
+
+    if (mode === "default") {
+      // Default = anti-pierce (curves only when needed), otherwise straight.
+      // Bidirectional naturally overlaps (both straight) unless piercing forces curvature.
+      applyAntiPierce(visEdges, positions);
+      return;
+    }
+
+    if (mode === "straight") {
+      for (const e of edges) updates.push({ id: e.id!, smooth: { enabled: false } as any });
+      visEdges.update(updates);
+      return;
+    }
+
+    // mode === "curved"
+    // Your existing “bidi ellipse” behavior stays here.
+    // Fast lookup for bidirectional
+    const pairSet = new Set<string>();
+    for (const e of edges) pairSet.add(`${String(e.from)}->${String(e.to)}`);
+    const isBidi = (a: string, b: string) => pairSet.has(`${a}->${b}`) && pairSet.has(`${b}->${a}`);
+
+    for (const e of edges) {
+      const from = String(e.from), to = String(e.to);
+      if (isBidi(from, to)) {
+        const type = "curvedCW" as const;
+        const roundness = from < to ? 0.30 : 0.22;
+        updates.push({ id: e.id!, smooth: { enabled: true, type, roundness } as any });
+      } else {
+        updates.push({ id: e.id!, smooth: { enabled: true, type: "curvedCW", roundness: 0.22 } as any });
+      }
+    }
+    visEdges.update(updates);
+  }
+
 
   // Left-pane editor adjacency
   const outgoingBySource = useMemo(() => {
@@ -903,6 +990,8 @@ export default function App() {
 
     visNodesRef.current = visNodes;
     visEdgesRef.current = visEdges;
+    positionsRef.current = positions;
+    applyEdgeMode(visEdges, positions, edgeMode);
 
     // Snapshot originals (once per build)
     origNodeStylesRef.current.clear();
@@ -949,9 +1038,90 @@ export default function App() {
           zoomView: true,
           selectConnectedEdges: false,
         },
+
+        nodes: {
+          labelHighlightBold: true,
+          chosen: {
+            node: (values: any, id: any, selected: boolean, hovering: boolean) => {
+              const n = visNodes.get(id) as any;
+              values.opacity = typeof n?.opacity === "number" ? n.opacity : 1.0;
+              const c = (n?.__origColor ?? n?.color) as any;
+              if (!c) return;
+
+              // Preserve FULL color object (border/background + highlight/hover)
+              const baseBorder = c.border ?? values.color?.border;
+              const baseBg = c.background ?? values.color?.background;
+
+              // highlight/hover might be either a string or an object; normalize
+              const hiObj = (c.hover ?? c.highlight ?? {}) as any;
+              const hiBorder = hiObj.border ?? baseBorder;
+              const hiBg = hiObj.background ?? baseBg;
+
+              const out = {
+                border: selected || hovering ? hiBorder : baseBorder,
+                background: selected || hovering ? hiBg : baseBg,
+                highlight: c.highlight ?? { border: hiBorder, background: hiBg },
+                hover: c.hover ?? { border: hiBorder, background: hiBg },
+              };
+
+              values.color = out;
+            },
+            label: (values: any, id: any) => {
+              const n = visNodes.get(id) as any;
+              if (n?.__origFont) values.font = { ...n.__origFont };
+            },
+          } as any,
+        },
+
+
+        edges: {
+          arrows: { to: { enabled: true, scaleFactor: 0.8 } },
+          width: 1.5,
+          chosen: {
+            edge: (values: any, id: any, selected: boolean, hovering: boolean) => {
+              const e = visEdges.get(id) as any;
+              const c = e?.__origColor ?? e?.color;
+
+              const base =
+                typeof c === "string"
+                  ? c
+                  : (c?.color ?? values.color ?? "#999");
+
+              const hi =
+                typeof c === "object"
+                  ? (typeof c.highlight === "string"
+                      ? c.highlight
+                      : (c.highlight?.color ?? base))
+                  : base;
+
+              const baseW = e?.__origWidth ?? values.width ?? 1.5;
+
+              if (selected || hovering) {
+                values.color = hi;
+                values.width = baseW + 0.9;
+              } else {
+                values.color = base;
+                values.width = baseW;
+              }
+            },
+          } as any,
+        },
+
+
         layout: { improvedLayout: false },
-        edges: { arrows: { to: { enabled: true, scaleFactor: 0.8 } }, width: 1.5 },
       }
+    );
+
+    // Ensure current drag setting is applied even after rebuild (e.g., tooltips toggle)
+    net.setOptions({ interaction: { dragNodes: dragNodes } });
+
+    // IMPORTANT: re-apply fixed/unfixed after rebuild (fontPx rebuild etc.)
+    const ids = visNodes.getIds() as (string | number)[];
+    visNodes.update(
+      ids.map((id) => ({
+        id,
+        fixed: dragNodes ? false : { x: true, y: true },
+      })) as any
     );
 
     // --- Plain DOM tooltip helpers (with hover intent) ---
@@ -1033,6 +1203,9 @@ export default function App() {
       }
     };
 
+    tooltipHideRef.current = hideTipNow;
+    tooltipClearTimersRef.current = clearTimers;
+
     const containerEl = containerRef.current;
 
     const onLeaveContainer = () => hideTipNow();
@@ -1063,7 +1236,8 @@ export default function App() {
           "pointer-events-none fixed z-[9999] px-2 py-1 rounded bg-black text-white shadow";
         el.style.whiteSpace = "pre-line";
         el.style.maxWidth = `${TIP_MAX_W}px`;
-        el.style.fontSize = `${Math.max(9, Math.min(22, fontPx))}px`;
+        el.style.fontSize = `${Math.max(9, Math.min(22, fontPxRef.current))}px`;
+
         el.style.lineHeight = "1.2";
         el.style.borderRadius = "8px";
 
@@ -1120,21 +1294,31 @@ export default function App() {
 
     // Node tooltips
     net.on("hoverNode", (params: any) => {
+      if (!tooltipsOnRef.current) {
+        scheduleHide();
+        return;
+      }
       const item = visNodesRef.current!.get(params.node) as any;
       const name = (item && item.label) || nodeById[String(params.node)]?.Name || "";
       const desc = (item && item.title) ? String(item.title) : "";
       const text = name && desc ? `${name}: ${desc}` : (name || desc || "");
       scheduleShow(params.event, text, "node");
     });
-    net.on("blurNode", () => scheduleHide());
+    net.on("blurNode", () => {
+      if (!tooltipsOnRef.current) return;
+      scheduleHide();
+    });
 
     // Edge tooltips
     net.on("hoverEdge", (params: any) => {
+      if (!tooltipsOnRef.current) {scheduleHide(); return;}
       const item = visEdgesRef.current!.get(params.edge) as any;
       const text = (item && item.title) ? String(item.title) : "";
       scheduleShow(params.event, text, "edge");
     });
-    net.on("blurEdge", () => scheduleHide());
+    net.on("blurEdge", () => {
+      if (!tooltipsOnRef.current){scheduleHide(); return;}
+    });
 
     // Hide while interacting
     net.on("dragStart", () => {
@@ -1148,14 +1332,6 @@ export default function App() {
     net.on("dragEnd", () => {
       // optional: keep hidden after drag; if you want tooltips back instantly, do nothing here
     });
-    net.setOptions({
-      nodes: { labelHighlightBold: true },
-      interaction: { hover: true, tooltipDelay: 0 }
-    });
-
-    // Anti-pierce curves
-    applyAntiPierce(visEdges, positions);
-    net.redraw();
 
     if (!initialFitDoneRef.current) {
       initialFitDoneRef.current = true;
@@ -1166,6 +1342,13 @@ export default function App() {
     }
 
     networkRef.current = net;
+
+    // IMPORTANT: vis-network can mutate node color objects on init.
+    // Restore palette exactly like Clear Filters does.
+    requestAnimationFrame(() => {
+      restorePaletteFromOrig();
+    });
+
     return () => {
       try {
         if (networkRef.current) {
@@ -1179,13 +1362,51 @@ export default function App() {
 
       clearTimers();
       hideTipNow();
+      tooltipHideRef.current = null;
+      tooltipClearTimersRef.current = null;
       net.destroy();
       containerEl?.removeEventListener("mouseleave", onLeaveContainer);
       containerEl?.removeEventListener("pointerleave", onLeaveContainer);
       networkRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, lifecycleMode, activeNodeIds, fontPx]);
+  }, [nodes, edges, lifecycleMode, activeNodeIds]);
+
+  useEffect(() => {
+    const net = networkRef.current;
+    const visNodes = visNodesRef.current;
+    if (!net || !visNodes) return;
+
+    try {
+      net.setOptions({
+        interaction: {
+          dragNodes,
+          dragView: !dragNodes,
+          hover: true,
+          tooltipDelay: 0,
+        },
+      });
+
+      const ids = visNodes.getIds() as (string | number)[];
+      visNodes.update(
+        ids.map((id) => ({
+          id,
+          fixed: dragNodes ? false : { x: true, y: true },
+        })) as any
+      );
+
+      // IMPORTANT: restoring palette during an active filter can undo dimming
+      if (filterMode === null) {
+        restorePaletteFromOrig();
+      } else {
+        net.redraw();
+      }
+    } catch (e) {
+      console.error("dragNodes toggle failed:", e);
+    }
+  }, [dragNodes, filterMode]);
+
+
 
   // Ensure a family is open and scroll the left pane so a node is visible
   function openFamilyAndScrollToNode(nodeId: string) {
@@ -1224,8 +1445,67 @@ export default function App() {
     markDirty();
   }
 
+  function ensureDragNodesOffForFilter() {
+    if (!dragNodes) return;
+
+    // Immediately update the vis network (not waiting for React state)
+    const net = networkRef.current;
+    const visNodes = visNodesRef.current;
+
+    try {
+      net?.setOptions({
+        interaction: {
+          dragNodes: false,
+          dragView: true,
+        },
+      });
+
+      if (visNodes) {
+        const ids = visNodes.getIds() as (string | number)[];
+        visNodes.update(
+          ids.map((id) => ({
+            id,
+            fixed: { x: true, y: true },
+          })) as any
+        );
+      }
+    } catch (e) {
+      console.error("ensureDragNodesOffForFilter failed:", e);
+    }
+
+    // Update UI state last
+    setDragNodes(false);
+  }
+
+  function restorePaletteFromOrig() {
+    const visNodes = visNodesRef.current;
+    const visEdges = visEdgesRef.current;
+    if (!visNodes || !visEdges) return;
+
+    // Re-apply exact originals (this is the "Clear Filters magic")
+    const nodeUpdates = visNodes.get().map((n: any) => ({
+      id: n.id,
+      color: n.__origColor ?? n.color,
+      font: n.__origFont ?? n.font,
+      opacity: typeof n.opacity === "number" ? n.opacity : 1.0,
+    }));
+
+    const edgeUpdates = visEdges.get().map((e: any) => ({
+      id: e.id,
+      color: e.__origColor ?? e.color,
+      width: e.__origWidth ?? e.width,
+    }));
+
+    visNodes.update(nodeUpdates as any);
+    visEdges.update(edgeUpdates as any);
+    networkRef.current?.redraw();
+}
+
   // Keep: selected node, its outgoing edges, and those edges’ destination nodes (no incoming)
   function applySelectByName(name: string) {
+    // If dragNodes is on, turn it off immediately so filtering applies in the same click
+    ensureDragNodesOffForFilter();
+
     setFilterMode("id");
     setSelectedName(name);
     setSelectedGroup("");
@@ -1251,12 +1531,18 @@ export default function App() {
         keepNodes.add(to);
       }
     }
+
     applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
+    networkRef.current?.redraw();
     markDirty();
   }
 
+
   // Keep: nodes in group, their outgoing edges, and the destination nodes
   function applySelectByGroup(group: string) {
+    // If dragNodes is on, turn it off immediately so filtering applies in the same click
+    ensureDragNodesOffForFilter();
+
     setFilterMode("group");
     setSelectedGroup(group);
     setSelectedName("");
@@ -1286,8 +1572,10 @@ export default function App() {
     const firstId = familyNodes[0]?.NameID;
     if (firstId) openFamilyAndScrollToNode(firstId);
 
+    networkRef.current?.redraw();
     markDirty();
   }
+
 
   // -----------------------------
   // Graph controls
@@ -1298,6 +1586,7 @@ export default function App() {
   function zoomOut(step = 1.01) {
     networkRef.current?.moveTo({ scale: (networkRef.current?.getScale() || 1) / step });
   }
+
   function fitUsable() {
     const net = networkRef.current;
     const container = containerRef.current;
@@ -1384,16 +1673,15 @@ export default function App() {
     const limCenterY = topPx + limH / 2;
 
     // Bounds from visible nodes (better Y-centering than anchors)
-    const positions = computeFixedHexPositions(nodes);
+    const visNodes = visNodesRef.current;
+    if (!visNodes) return;
 
-    const visibleNodeIds =
-      lifecycleMode === "none"
-        ? nodes.map(n => n.NameID)
-        : nodes.filter(n => activeNodeIds.has(n.NameID)).map(n => n.NameID);
+    const ids = visNodes.getIds() as (string | number)[];
+    const posMap = net.getPositions(ids as any);
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const id of visibleNodeIds) {
-      const p = positions[id];
+    for (const id of ids) {
+      const p = posMap[String(id)];
       if (!p) continue;
       minX = Math.min(minX, p.x);
       minY = Math.min(minY, p.y);
@@ -1401,6 +1689,7 @@ export default function App() {
       maxY = Math.max(maxY, p.y);
     }
     if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
+
 
     // a bit of padding in graph coords so labels feel safe
     const G_PAD = 30;
@@ -1434,14 +1723,41 @@ export default function App() {
     });
   }
 
-
-
   function pan(dx: number, dy: number) {
     const p = networkRef.current?.getViewPosition();
     const s = networkRef.current?.getScale() || 1;
     if (!p) return;
     networkRef.current?.moveTo({ position: { x: p.x - dx / s, y: p.y - dy / s } });
   }
+  function resetViewOnly() {
+    stopHold();
+    const net = networkRef.current;
+    const visNodes = visNodesRef.current;
+    const positions = positionsRef.current;
+    if (!net || !visNodes || !positions) return;
+
+    net.unselectAll();
+
+    const ids = visNodes.getIds() as (string | number)[];
+    visNodes.update(
+      ids
+        .map((id) => {
+          const p = positions[String(id)];
+          if (!p) return null;
+          return {
+            id,
+            x: p.x,
+            y: p.y,
+            fixed: dragNodes ? false : { x: true, y: true },
+          };
+        })
+        .filter(Boolean) as any
+    );
+
+    net.redraw();
+    fitUsable();
+  }
+
 
   // --- Global stop for holds ---
   useEffect(() => {
@@ -1458,6 +1774,27 @@ export default function App() {
       document.removeEventListener("visibilitychange", stopIfHidden);
     };
   }, []);
+
+  useEffect(() => {
+    const visNodes = visNodesRef.current;
+    if (!visNodes) return;
+
+    const size = Math.max(9, Math.min(22, fontPx));
+
+    const updates = visNodes.get().map((n: any) => {
+      const baseFont = n.__origFont ?? n.font ?? {};
+      const nextFont = { ...baseFont, size };
+      return {
+        id: n.id,
+        font: nextFont,
+        __origFont: nextFont, // keep dim/restore consistent
+      };
+    });
+
+    visNodes.update(updates as any);
+    networkRef.current?.redraw();
+  }, [fontPx]);
+
 
   // --- Keyboard holds for arrows and +/- ---
   useEffect(() => {
@@ -1478,6 +1815,13 @@ export default function App() {
       window.removeEventListener("keyup", keyUp);
     };
   }, []);
+
+  useEffect(() => {
+    const visEdges = visEdgesRef.current;
+    const pos = positionsRef.current;
+    if (!visEdges || !pos) return;
+    applyEdgeMode(visEdges, pos, edgeMode);
+  }, [edgeMode]);
 
   // -----------------------------
   // Export & Share
@@ -1996,7 +2340,7 @@ export default function App() {
                 <button
                   onClick={startLifecycleCreate}
                   className={`px-3 py-1.5 ${ui.btnPill}`}
-                  title="Start a new lifecycle from scratch"
+                  title={uiTitle("Start a new lifecycle from scratch")}
                   aria-label="Start Custom Lifecycle"
                 >
                   Start Custom Lifecycle
@@ -2004,7 +2348,7 @@ export default function App() {
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   className={`px-3 py-1.5 ${ui.btnPill}`}
-                  title="Load and edit a lifecycle from an .xlsx file"
+                  title={uiTitle("Load and edit a lifecycle from an .xlsx file")}
                   aria-label="Edit Custom Lifecycle"
                 >
                   Edit Custom Lifecycle
@@ -2017,7 +2361,7 @@ export default function App() {
                     className={ui.input}
                     value={selectedExample}
                     onChange={(e) => setSelectedExample(e.target.value)}
-                    title="Choose an example lifecycle"
+                    title={uiTitle("Choose an example lifecycle")}
                     aria-label="Choose an example lifecycle"
                   >
                     {exampleFiles.map((e) => (
@@ -2029,7 +2373,7 @@ export default function App() {
                   <button
                     className={`px-3 py-1.5 ${ui.btnPill}`}
                     onClick={() => loadExampleByName(selectedExample)}
-                    title="Load selected example"
+                    title={uiTitle("Load selected example")}
                     aria-label="Load selected example"
                   >
                     Load Example
@@ -2052,7 +2396,7 @@ export default function App() {
                 const lose = confirm("Cancel Custom Lifecycle? Unsaved progress will be lost.");
                 if (lose) resetLifecycle();
               }}
-              title="Cancel and discard current lifecycle changes"
+              title={uiTitle("Cancel and discard current lifecycle changes")}
               aria-label="Cancel Custom Lifecycle"
             >
               Cancel Custom Lifecycle
@@ -2220,7 +2564,7 @@ export default function App() {
                                         ? "text-xs font-semibold text-neutral-200"
                                         : "text-xs font-semibold text-gray-700"
                                     }
-                                    title="Activate edges this node can take; destinations become part of the kept view."
+                                    title={uiTitle("Activate edges this node can take; destinations become part of the kept view.")}
                                   >
                                     Outgoing edges
                                   </div>
@@ -2314,7 +2658,7 @@ export default function App() {
           <div className={`mt-3 pt-3 border-t ${ui.divider} flex items-center gap-2`}>
             <button
               className={`px-3 py-1.5 ${ui.btnPill}`}
-              title="Run checks to ensure your lifecycle is valid"
+              title={uiTitle("Run checks to ensure your lifecycle is valid")}
               aria-label="Validate lifecycle"
               onClick={() => {
                 const errs = getLifecycleErrors();
@@ -2328,7 +2672,7 @@ export default function App() {
               className={`px-3 py-1.5 ${ui.btnPill} disabled:opacity-50`}
               disabled={getLifecycleErrors().length > 0}
               onClick={saveLifecycle}
-              title="Download a validated lifecycle workbook (.xlsx) you can reuse or share"
+              title={uiTitle("Download a validated lifecycle workbook (.xlsx) you can reuse or share")}
               aria-label="Save lifecycle to XLSX"
             >
               Download Lifecycle (XLSX)
@@ -2379,11 +2723,12 @@ export default function App() {
             }`}
           >
             <PanelHeader
-              title="Save, Export & Groups"
+              title={"Save, Export & Groups"}
               isCollapsed={collapsed.leftTop}
               onHelp={() => setMicroGuideKey("exportGroups")}
               onToggleCollapse={() => setCollapsed(p => ({ ...p, leftTop: !p.leftTop }))}
               isDark={isDark}
+              uiTitle={uiTitle}
             />
 
             {!collapsed.leftTop && (
@@ -2419,7 +2764,7 @@ export default function App() {
                   <div className="text-[11px] font-semibold opacity-90 mb-2">Groups</div>
 
                   <div className="space-y-2">
-                    {(lifecycleMode === "none" ? groups : visibleFamilies).map((fam) => {
+                    {groups.map((fam) => {
                       const c = makeColorForFamily(fam);
                       const bg = c.highlight?.background ?? c.background;
                       const br = c.highlight?.border ?? c.border;
@@ -2463,24 +2808,96 @@ export default function App() {
             className={`${ui.panel} rounded-lg shadow pointer-events-auto overflow-hidden shrink-0`}
           >
             <PanelHeader
-              title="View"
+              title={"View"}
               isCollapsed={collapsed.leftBottom}
               onHelp={() => setMicroGuideKey("view")}
               onToggleCollapse={() => setCollapsed(p => ({ ...p, leftBottom: !p.leftBottom }))}
               isDark={isDark}
+              uiTitle={uiTitle}
             />
 
             {!collapsed.leftBottom && (
-              <div className="px-3 pb-3">
-                <div className="grid grid-cols-3 gap-2">
-                  <div />
-                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(0, PAN_STEP)}>↑</HoldButton>
-                  <div />
+              <div className="px-3 pb-3 flex flex-col gap-2">
+                {/* 1) View */}
+                <SubPanel title={"View"}>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div />
+                    <HoldButton onHold={() => pan(0, PAN_STEP)} className={ui.btnPill}>↑</HoldButton>
+                    <div />
+                    <HoldButton onHold={() => pan(PAN_STEP, 0)} className={ui.btnPill}>←</HoldButton>
+                    <HoldButton onHold={() => pan(0, -PAN_STEP)} className={ui.btnPill}>↓</HoldButton>
+                    <HoldButton onHold={() => pan(-PAN_STEP, 0)} className={ui.btnPill}>→</HoldButton>
+                  </div>
+                </SubPanel>
 
-                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(PAN_STEP, 0)}>←</HoldButton>
-                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(0, -PAN_STEP)}>↓</HoldButton>
-                  <HoldButton className={`${ui.btnPill} py-2`} onHold={() => pan(-PAN_STEP, 0)}>→</HoldButton>
-                </div>
+                {/* 2) Toggle */}
+                <SubPanel title={"Toggle"}>
+                  <div className="flex items-center gap-2">
+                    <label className={`flex items-center gap-2 text-xs ${filterMode !== null ? "opacity-50 cursor-not-allowed" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={dragNodes}
+                        disabled={filterMode !== null}
+                        onChange={(e) => setDragNodes(e.target.checked)}
+                      />
+                      Drag nodes
+                    </label>
+
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={tooltipsOn}
+                        onChange={(e) => setTooltipsOn(e.target.checked)}
+                      />
+                      Tooltips
+                    </label>
+
+                    <button
+                      type="button"
+                      className={`${ui.btnPill} h-7 px-2 !text-[12px] leading-tight`}
+                      onClick={resetViewOnly}
+                      title={uiTitle("Reset view and Fit")}
+                      aria-label="Reset view"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </SubPanel>
+
+                {/* 3) Edge Mode */}
+                <SubPanel title={"Edge Mode"}>
+                  <div className="flex flex-col gap-1 text-xs">
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="edgeMode"
+                        checked={edgeMode === "default"}
+                        onChange={() => setEdgeMode("default")}
+                      />
+                      Default (anti-pierce)
+                    </label>
+
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="edgeMode"
+                        checked={edgeMode === "straight"}
+                        onChange={() => setEdgeMode("straight")}
+                      />
+                      Straight
+                    </label>
+
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="edgeMode"
+                        checked={edgeMode === "curved"}
+                        onChange={() => setEdgeMode("curved")}
+                      />
+                      Curved
+                    </label>
+                  </div>
+                </SubPanel>
               </div>
             )}
           </div>
@@ -2503,12 +2920,13 @@ export default function App() {
             }`}
           >
             <PanelHeader
-              title="Filters"
+              title={"Filters"}
               isCollapsed={collapsed.rightTop}
               isDark={isDark}
               onHelp={() => setMicroGuideKey("filters")}
               onClear={clearFilters}
               onToggleCollapse={() => setCollapsed((p) => ({ ...p, rightTop: !p.rightTop }))}
+              uiTitle={uiTitle}
             />
 
 
@@ -2580,7 +2998,7 @@ export default function App() {
                       return (
                         <button
                           key={fam}
-                          className="w-full rounded-md px-3 py-2 text-sm font-semibold tracking-wide"
+                          className="w-full rounded-md px-3 py-2 !text-[12px] leading-none font-semibold tracking-wide truncate whitespace-nowrap overflow-hidden"
                           style={{ background: c.background, border: `2px solid ${c.border}`, color: "#000" }}
                           onClick={() => applySelectByGroup(fam)}
                         >
@@ -2603,12 +3021,13 @@ export default function App() {
             className={`${ui.panel} rounded-lg shadow pointer-events-auto overflow-hidden shrink-0`}
           >
             <PanelHeader
-              title="Label Size, Zoom & Help"
+              title={"Label Size, Zoom & Help"}
               isCollapsed={collapsed.rightBottom}
               onFit={fitUsable}
               onHelp={() => setMicroGuideKey("zoom")}
               onToggleCollapse={() => setCollapsed(p => ({ ...p, rightBottom: !p.rightBottom }))}
               isDark={isDark}
+              uiTitle={uiTitle}
             />
 
             {!collapsed.rightBottom && (
@@ -2633,8 +3052,8 @@ export default function App() {
                 <div className="rounded-md border border-white/10 p-2">
                   <div className="text-[11px] font-semibold opacity-90 mb-2">Zoom</div>
                   <div className="grid grid-cols-2 gap-2">
-                    <HoldButton className={`${ui.btnPill} py-2`} onHold={() => zoomOut(1.01)}>-</HoldButton>
-                    <HoldButton className={`${ui.btnPill} py-2`} onHold={() => zoomIn(1.01)}>+</HoldButton>
+                    <HoldButton className={ui.btnPill} onHold={() => zoomIn(1.01)} title={uiTitle("Zoom In")}>+</HoldButton>
+                    <HoldButton className={ui.btnPill} onHold={() => zoomOut(1.01)} title={uiTitle("Zoom Out")}>−</HoldButton>
                   </div>
                 </div>
 
@@ -2668,6 +3087,21 @@ export default function App() {
   );
 }
 
+function SubPanel({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-white/10 p-2">
+      <div className="text-[11px] font-semibold opacity-90 mb-2">{title}</div>
+      {children}
+    </div>
+  );
+}
+
 /** Small hold-to-repeat button helper using the global controller */
 function HoldButton({
   className,
@@ -2687,11 +3121,11 @@ function HoldButton({
       className={className}
       title={title}
       aria-label={ariaLabel || title}
-      onMouseDown={() => onHold()}
-      onMouseUp={() => stopHold()}
-      onMouseLeave={() => stopHold()}
-      onTouchStart={() => onHold()}
-      onTouchEnd={() => stopHold()}
+      onMouseDown={() => beginHold(onHold)}
+      onMouseUp={stopHold}
+      onMouseLeave={stopHold}
+      onTouchStart={() => beginHold(onHold)}
+      onTouchEnd={stopHold}
     >
       {children}
     </button>
@@ -2706,6 +3140,7 @@ function PanelHeader({
   onFit,
   onClear,
   isDark,
+  uiTitle, // NEW
 }: {
   title: string;
   isCollapsed: boolean;
@@ -2714,6 +3149,7 @@ function PanelHeader({
   onFit?: () => void;
   onClear?: () => void;
   isDark: boolean;
+  uiTitle?: (s: string) => string | undefined; // NEW
 }) {
   const iconBtn = [
     "h-7 w-7 rounded-md border flex items-center justify-center select-none",
@@ -2745,7 +3181,7 @@ function PanelHeader({
           <button
             type="button"
             className={iconBtn}
-            title="Fit"
+            title={uiTitle ? uiTitle("Fit") : "Fit"}
             aria-label="Fit"
             onClick={stop(onFit)}
           >
@@ -2757,7 +3193,7 @@ function PanelHeader({
           <button
             type="button"
             className={smallBtn}
-            title="Clear Filters"
+            title={uiTitle ? uiTitle("Clear Filters") : "Clear Filters"}
             aria-label="Clear Filters"
             onClick={stop(onClear)}
           >
@@ -2768,7 +3204,7 @@ function PanelHeader({
         <button
           type="button"
           className={iconBtn}
-          title="Help"
+          title={uiTitle ? uiTitle("Help") : "Help"}
           aria-label="Help"
           onClick={stop(onHelp)}
         >
@@ -2778,7 +3214,7 @@ function PanelHeader({
         <button
           type="button"
           className={iconBtn}
-          title={isCollapsed ? "Expand" : "Collapse"}
+          title={uiTitle ? uiTitle(isCollapsed ? "Expand" : "Collapse") : (isCollapsed ? "Expand" : "Collapse")}
           aria-label={isCollapsed ? "Expand" : "Collapse"}
           onClick={stop(onToggleCollapse)}
         >
