@@ -48,12 +48,15 @@ export default function MicroGuideOverlay({
 
       case "view":
         return {
-          title: "View (Pan)",
+          title: "View (Pan + Toggles)",
           bullets: [
-            "Use arrows (or arrow keys) to pan the graph precisely.",
-            "Hold buttons to continuously pan.",
+            "Use arrows (or arrow keys) to pan precisely. Hold buttons to continuously pan.",
+            "Drag nodes: lets you manually reposition nodes (turn off to lock).",
+            "Tooltips: turns tooltips on/off across the app (graph + UI).",
+            "Reset: restores default node positions and refits the view.",
+            "Edge Mode: Default uses anti-pierce (curves only when needed); Straight/Curved are overrides.",
           ],
-          tip: "Tip: If you get lost, use Fit in the Zoom panel to recenter to the usable area.",
+          tip: "Tip: If you drag nodes, Fit will still work — it fits to the current node positions.",
         };
 
       case "zoom":
