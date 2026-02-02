@@ -456,11 +456,15 @@ function clearDimStyles(
   for (const n of visNodes.get()) {
     const id = String(n.id);
     const orig = origNodeStyles.get(id);
+    const anyN = n as any;
+
     nodeUpdates.push({
       id,
       opacity: orig?.opacity ?? 1.0,
-      font: orig?.font ?? (n as any).__origFont ?? { color: "#111827" },
-      color: orig?.color ?? (n as any).__origColor ?? (n as any).color,
+      color: orig?.color ?? anyN.__origColor ?? anyN.color,
+      font: orig?.font ?? anyN.__origFont ?? anyN.font,
+      label: anyN.__origLabel ?? anyN.label,
+      __dimmed: false,
     });
   }
 
@@ -468,16 +472,19 @@ function clearDimStyles(
   for (const e of visEdges.get()) {
     const id = String(e.id);
     const orig = origEdgeStyles.get(id);
+    const anyE = e as any;
+
     edgeUpdates.push({
       id,
-      color: orig?.color ?? (e as any).__origColor ?? (e as any).color,
-      width: orig?.width ?? (e as any).__origWidth ?? (e as any).width,
+      color: orig?.color ?? anyE.__origColor ?? anyE.color,
+      width: orig?.width ?? anyE.__origWidth ?? anyE.width,
     });
   }
 
   if (nodeUpdates.length) visNodes.update(nodeUpdates);
   if (edgeUpdates.length) visEdges.update(edgeUpdates);
 }
+
 
 // BFS for lifecycle “active” nodes
 function bfsReachable(start: string, edgesSet: Set<string>): Set<string> {
@@ -572,9 +579,10 @@ function buildVisDatasets(
             hover: { border: "#a1a1aa", background: "#e5e7eb" },
           };
 
-      node.color = baseColor;
-      node.__origColor = JSON.parse(JSON.stringify(baseColor)); // <-- clone so vis can't mutate your "original"
+      node.__origColor = JSON.parse(JSON.stringify(baseColor));
       node.__origFont = JSON.parse(JSON.stringify(node.font));
+      node.__origLabel = node.label;     // ✅ restore labels after filtering
+      node.__dimmed = false;             // ✅ track dim state (used by hover logic)
 
 
       return node as VisNode;
@@ -971,7 +979,13 @@ export default function App() {
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) return;
 
-    const positions = computeFixedHexPositions(nodes);
+    // Start from canonical fixed positions, but overlay any live dragged positions we saved
+    const fixedPositions = computeFixedHexPositions(nodes);
+    const positions: Record<string, { x: number; y: number }> = {
+      ...fixedPositions,
+      ...(positionsRef.current ?? {}),
+    };
+
 
     const baseNodes = lifecycleMode === "none"
       ? nodes
@@ -1034,45 +1048,16 @@ export default function App() {
           tooltipDelay: 0,
           multiselect: false,
           dragNodes: false,
-          dragView: true,
+          dragView: !dragNodes, // ✅ if dragNodes is ON, do NOT drag the canvas
           zoomView: true,
           selectConnectedEdges: false,
         },
 
+
         nodes: {
           labelHighlightBold: true,
-          chosen: {
-            node: (values: any, id: any, selected: boolean, hovering: boolean) => {
-              const n = visNodes.get(id) as any;
-              values.opacity = typeof n?.opacity === "number" ? n.opacity : 1.0;
-              const c = (n?.__origColor ?? n?.color) as any;
-              if (!c) return;
-
-              // Preserve FULL color object (border/background + highlight/hover)
-              const baseBorder = c.border ?? values.color?.border;
-              const baseBg = c.background ?? values.color?.background;
-
-              // highlight/hover might be either a string or an object; normalize
-              const hiObj = (c.hover ?? c.highlight ?? {}) as any;
-              const hiBorder = hiObj.border ?? baseBorder;
-              const hiBg = hiObj.background ?? baseBg;
-
-              const out = {
-                border: selected || hovering ? hiBorder : baseBorder,
-                background: selected || hovering ? hiBg : baseBg,
-                highlight: c.highlight ?? { border: hiBorder, background: hiBg },
-                hover: c.hover ?? { border: hiBorder, background: hiBg },
-              };
-
-              values.color = out;
-            },
-            label: (values: any, id: any) => {
-              const n = visNodes.get(id) as any;
-              if (n?.__origFont) values.font = { ...n.__origFont };
-            },
-          } as any,
+          chosen: false as any,
         },
-
 
         edges: {
           arrows: { to: { enabled: true, scaleFactor: 0.8 } },
@@ -1113,7 +1098,13 @@ export default function App() {
     );
 
     // Ensure current drag setting is applied even after rebuild (e.g., tooltips toggle)
-    net.setOptions({ interaction: { dragNodes: dragNodes } });
+    net.setOptions({
+      interaction: {
+        dragNodes,
+        dragView: !dragNodes,
+      },
+    });
+
 
     // IMPORTANT: re-apply fixed/unfixed after rebuild (fontPx rebuild etc.)
     const ids = visNodes.getIds() as (string | number)[];
@@ -1364,6 +1355,20 @@ export default function App() {
       hideTipNow();
       tooltipHideRef.current = null;
       tooltipClearTimersRef.current = null;
+
+      // ✅ Persist current (possibly dragged) node positions so rebuilds don't snap back
+      try {
+        const ids = visNodes.getIds() as (string | number)[];
+        const posMap = net.getPositions(ids as any);
+
+        const next: Record<string, { x: number; y: number }> = { ...(positionsRef.current ?? {}) };
+        for (const id of ids) {
+          const p = posMap[String(id)];
+          if (p) next[String(id)] = { x: p.x, y: p.y };
+        }
+        positionsRef.current = next;
+      } catch {}
+
       net.destroy();
       containerEl?.removeEventListener("mouseleave", onLeaveContainer);
       containerEl?.removeEventListener("pointerleave", onLeaveContainer);
@@ -1754,6 +1759,8 @@ export default function App() {
         .filter(Boolean) as any
     );
 
+    restorePaletteFromOrig();
+
     net.redraw();
     fitUsable();
   }
@@ -1787,14 +1794,16 @@ export default function App() {
       return {
         id: n.id,
         font: nextFont,
-        __origFont: nextFont, // keep dim/restore consistent
+        __origFont: JSON.parse(JSON.stringify(nextFont)), // ✅ clone
       };
     });
 
     visNodes.update(updates as any);
+
+    restorePaletteFromOrig(); // ✅ keep exactly here
+
     networkRef.current?.redraw();
   }, [fontPx]);
-
 
   // --- Keyboard holds for arrows and +/- ---
   useEffect(() => {
