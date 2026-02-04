@@ -1385,6 +1385,28 @@ export default function App() {
     const net = networkRef.current;
     const visNodes = visNodesRef.current;
     if (!net || !visNodes) return;
+  
+    // IMPORTANT: do NOT drop dragView when toggling dragNodes
+    net.setOptions({
+      interaction: {
+        hover: true,
+        tooltipDelay: 0,
+        multiselect: false,
+        dragNodes,
+        dragView: true,      // ✅ lets you drag the canvas on empty space
+        zoomView: true,
+        selectConnectedEdges: false,
+      },
+    });
+  
+    const ids = visNodes.getIds() as (string | number)[];
+    visNodes.update(
+      ids.map((id) => ({
+        id,
+        fixed: dragNodes ? false : { x: true, y: true },
+      })) as any
+    );
+  }, [dragNodes]);
 
     try {
       // IMPORTANT: do NOT drop dragView when toggling dragNodes
