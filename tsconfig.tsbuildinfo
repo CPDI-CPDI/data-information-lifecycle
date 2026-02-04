@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/GuideOverlay.tsx","./src/components/MicroGuideOverlay.tsx","./src/types/papaparse.d.ts"],"version":"5.8.3"}
+{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/components/GuideOverlay.tsx","./src/components/MicroGuideOverlay.tsx","./src/types/papaparse.d.ts"],"errors":true,"version":"5.8.3"}
