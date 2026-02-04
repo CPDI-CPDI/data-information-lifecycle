@@ -1110,8 +1110,6 @@ export default function App() {
       },
     });
 
-
-
     // IMPORTANT: re-apply fixed/unfixed after rebuild (fontPx rebuild etc.)
     const ids = visNodes.getIds() as (string | number)[];
     visNodes.update(
@@ -1410,6 +1408,38 @@ export default function App() {
     );
   }, [dragNodes]);
 
+    try {
+      // IMPORTANT: do NOT drop dragView when toggling dragNodes
+      net.setOptions({
+        interaction: {
+          hover: true,
+          tooltipDelay: 0,
+          multiselect: false,
+          dragNodes,
+          dragView: true,      // ✅ lets you drag the canvas on empty space
+          zoomView: true,
+          selectConnectedEdges: false,
+        },
+      });
+
+      const ids = visNodes.getIds() as (string | number)[];
+      visNodes.update(
+        ids.map((id) => ({
+          id,
+          fixed: dragNodes ? false : { x: true, y: true },
+        })) as any
+      );
+
+      // IMPORTANT: restoring palette during an active filter can undo dimming
+      if (filterMode === null) {
+        restorePaletteFromOrig();
+      } else {
+        net.redraw();
+      }
+    } catch (e) {
+      console.error("dragNodes toggle failed:", e);
+    }
+  }, [dragNodes, filterMode]);
 
 
 
