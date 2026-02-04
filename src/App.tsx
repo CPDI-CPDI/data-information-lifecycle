@@ -1100,11 +1100,15 @@ export default function App() {
     // Ensure current drag setting is applied even after rebuild (e.g., tooltips toggle)
     net.setOptions({
       interaction: {
+        hover: true,
+        tooltipDelay: 0,
+        multiselect: false,
         dragNodes,
-        dragView: !dragNodes,
+        dragView: true,
+        zoomView: true,
+        selectConnectedEdges: false,
       },
     });
-
 
     // IMPORTANT: re-apply fixed/unfixed after rebuild (fontPx rebuild etc.)
     const ids = visNodes.getIds() as (string | number)[];
@@ -1383,12 +1387,16 @@ export default function App() {
     if (!net || !visNodes) return;
 
     try {
+      // IMPORTANT: do NOT drop dragView when toggling dragNodes
       net.setOptions({
         interaction: {
-          dragNodes,
-          dragView: !dragNodes,
           hover: true,
           tooltipDelay: 0,
+          multiselect: false,
+          dragNodes,
+          dragView: true,      // ✅ lets you drag the canvas on empty space
+          zoomView: true,
+          selectConnectedEdges: false,
         },
       });
 
