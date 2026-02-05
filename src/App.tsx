@@ -294,12 +294,12 @@ async function fetchCsv<T extends Record<string, any> = Record<string, any>>(url
   return (parsed.data ?? []).filter((row) => row && typeof row === "object" && Object.keys(row as object).length > 0);
 }
 
-// --- Fixed family tiers (your requested scheme) ---
+// --- Fixed family tiers (keep if you still want "dark/mid/soft" intensity) ---
 type Tier = "dark" | "mid" | "soft";
 const FAMILY_TIER: Record<string, Tier> = {
   INITIATION: "dark",
-  ACQUISITION: "mid",      // keep
-  CONFIGURATION: "mid",    // ⬅️ was "dark" — mid makes it less harsh
+  ACQUISITION: "mid",
+  CONFIGURATION: "mid",
   PROCESSING: "soft",
   LEVERAGING: "soft",
   DISPOSITION: "mid",
@@ -313,22 +313,87 @@ const FAMILY_TIER: Record<string, Tier> = {
   "Archive transfer & destroy": "mid",
 };
 
-// --- Stable, CVD-friendly base hues per family (distinct around wheel) ---
-const BASE_HUES: Record<string, number> = {
-  INITIATION: 30,    // keep amber
-  ACQUISITION: 190,  // ⬅️ tone down (less “strong blue” than 210)
-  LEVERAGING: 305,   // keep
-  CONFIGURATION: 0,  // ⬅️ make this true red family hue
-  PROCESSING: 95,    // keep
-  DISPOSITION: 265,  // keep
+// ✅ Your approved colorblind-accessible HEX palette (6 families → 6 colors)
+const BASE_HEX: Record<string, string> = {
+  // Suggested mapping to match your original intent:
+  // CONFIGURATION was “red-ish” → D81B60
+  // ACQUISITION was “blue-ish” → 1E88E5
+  // INITIATION was “amber-ish” → FFC107
+  // PROCESSING “teal-ish” → 66EFD1
+  // LEVERAGING “lime-ish” → D7E855
+  // DISPOSITION “purple-ish” → 2204C4
 
-  "Plan, design & enable": 30,
-  "Create, Capture & Collect": 210,
-  "Access, use & share": 285,
-  "Organize, store & maintain": 15,
-  "Provision, integrate & Curate": 95,
-  "Archive transfer & destroy": 265,
+  CONFIGURATION: "#D81B60",
+  ACQUISITION: "#1E88E5",
+  INITIATION: "#FFC107",
+  PROCESSING: "#66EFD1",
+  LEVERAGING: "#D7E855",
+  DISPOSITION: "#2204C4",
+
+  // long display names map to same family
+  "Plan, design & enable": "#FFC107",
+  "Create, Capture & Collect": "#1E88E5",
+  "Access, use & share": "#D7E855",
+  "Organize, store & maintain": "#D81B60",
+  "Provision, integrate & Curate": "#66EFD1",
+  "Archive transfer & destroy": "#2204C4",
 };
+
+function clamp01(n: number) {
+  return Math.max(0, Math.min(1, n));
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace("#", "").trim();
+  const full = h.length === 3 ? h.split("").map(ch => ch + ch).join("") : h;
+  const n = parseInt(full, 16);
+  return {
+    r: (n >> 16) & 255,
+    g: (n >> 8) & 255,
+    b: n & 255,
+  };
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const to2 = (x: number) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, "0");
+  return `#${to2(r)}${to2(g)}${to2(b)}`.toUpperCase();
+}
+
+// mix(colorA -> colorB) by t in [0..1]
+function mixHex(a: string, b: string, t: number): string {
+  t = clamp01(t);
+  const A = hexToRgb(a);
+  const B = hexToRgb(b);
+  return rgbToHex(
+    A.r + (B.r - A.r) * t,
+    A.g + (B.g - A.g) * t,
+    A.b + (B.b - A.b) * t
+  );
+}
+
+function lighten(hex: string, amt: number) {
+  return mixHex(hex, "#FFFFFF", amt);
+}
+function darken(hex: string, amt: number) {
+  return mixHex(hex, "#000000", amt);
+}
+
+// Given a base hex and tier, derive background/border/highlight/hover without HSL
+function shadeForHex(base: string, tier: Tier) {
+  // These are intentionally conservative so colors stay “the same family”
+  // while still giving clear borders + hover/highlight.
+  const bg =
+    tier === "dark" ? darken(base, 0.25)
+    : tier === "mid" ? base
+    : lighten(base, 0.35);
+
+  const border = darken(bg, 0.35);
+
+  const hiBg = lighten(bg, 0.18);
+  const hiBorder = darken(border, 0.10);
+
+  return { bg, border, hiBg, hiBorder };
+}
 
 // === Family canonicalization ===
 const FAMILY_CANON: Record<string, string> = {
@@ -351,34 +416,23 @@ const FAMILY_CANON: Record<string, string> = {
 
 function canonFam(f: string): string {
   if (!f) return f;
-  return FAMILY_CANON[f] ?? FAMILY_CANON[f.trim()] ?? f;
+  return FAMILY_CANON[f] ?? FAMILY_CANON[f.trim()] ?? f.trim();
 }
 
-function hsl(h: number, s: number, l: number) {
-  return `hsl(${h}, ${s}%, ${l}%)`; // commas = safest for canvas
-}
-
-// Given a tier, pick accessible lightness & slightly darker border
-function shadeFor(hue:number, tier:Tier) {
-  // moderate saturation keeps separability under CVD
-  const sat = 62;
-  const L = tier === "dark" ? 38 : tier === "mid" ? 58 : 85;   // background
-  const bg = hsl(hue, sat, L);
-  const border = hsl(hue, Math.min(82, sat + 10), Math.max(22, L - 20));
-  const hiBg = hsl(hue, Math.min(80, sat + 6), Math.min(92, L + 8));
-  const hiBorder = hsl(hue, Math.min(88, sat + 16), Math.max(18, L - 26));
-  return { bg, border, hiBg, hiBorder };
-}
-
-// 🔁 DROP-IN REPLACEMENT for makeColorForFamily
 function makeColorForFamily(
   family: string
 ): { border: string; background: string; highlight: { border: string; background: string } } {
   const canonical = canonFam(family);
-  const hue = BASE_HUES[canonical] ?? 200;                   // fallback hue
-  const tier: Tier = FAMILY_TIER[canonical] ?? "mid";        // fallback tier
-  const { bg, border, hiBg, hiBorder } = shadeFor(hue, tier);
-  return { border, background: bg, highlight: { border: hiBorder, background: hiBg } };
+  const base = BASE_HEX[canonical] ?? "#999999";
+  const tier: Tier = FAMILY_TIER[canonical] ?? "mid";
+
+  const { bg, border, hiBg, hiBorder } = shadeForHex(base, tier);
+
+  return {
+    border,
+    background: bg,
+    highlight: { border: hiBorder, background: hiBg },
+  };
 }
 
 const CANON_FAMILY_ORDER = [
@@ -773,6 +827,27 @@ export default function App() {
   const tooltipHideRef = useRef<null | (() => void)>(null);
   const tooltipClearTimersRef = useRef<null | (() => void)>(null);
 
+  const pendingDimRafRef = useRef<number | null>(null);
+
+  function scheduleApplyDim(keepNodes: Set<string>, keepEdges: Set<string>) {
+    const visNodes = visNodesRef.current;
+    const visEdges = visEdgesRef.current;
+    if (!visNodes || !visEdges) return;
+
+    // cancel any in-flight scheduled dim from a prior click
+    if (pendingDimRafRef.current != null) {
+      cancelAnimationFrame(pendingDimRafRef.current);
+      pendingDimRafRef.current = null;
+    }
+
+    // apply on next frame, after vis-network finishes its internal post-update work
+    pendingDimRafRef.current = requestAnimationFrame(() => {
+      pendingDimRafRef.current = null;
+      applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
+      networkRef.current?.redraw();
+    });
+  }
+
   const uiTitle = (s: string) => (tooltipsOn ? s : undefined);
 
   // This ref lets your tooltip handlers check the latest value without re-binding events.
@@ -1061,6 +1136,11 @@ export default function App() {
 
         edges: {
           arrows: { to: { enabled: true, scaleFactor: 0.8 } },
+
+          // ✅ makes the line STOP at the arrow (no line drawn “through” the arrowhead)
+          // which effectively ends the edge on the node border / radius.
+          arrowStrikethrough: false,
+
           width: 1.5,
           chosen: {
             edge: (values: any, id: any, selected: boolean, hovering: boolean) => {
@@ -1357,6 +1437,13 @@ export default function App() {
 
       clearTimers();
       hideTipNow();
+
+      // cancel any pending dim from the previous network instance
+      if (pendingDimRafRef.current != null) {
+        cancelAnimationFrame(pendingDimRafRef.current);
+        pendingDimRafRef.current = null;
+      }
+
       tooltipHideRef.current = null;
       tooltipClearTimersRef.current = null;
 
@@ -1512,7 +1599,7 @@ export default function App() {
     visNodes.update(nodeUpdates as any);
     visEdges.update(edgeUpdates as any);
     networkRef.current?.redraw();
-}
+  }
 
   // Keep: selected node, its outgoing edges, and those edges’ destination nodes (no incoming)
   function applySelectByName(name: string) {
@@ -1530,7 +1617,6 @@ export default function App() {
 
     openFamilyAndScrollToNode(id);
 
-    const visNodes = visNodesRef.current!;
     const visEdges = visEdgesRef.current!;
 
     const keepNodes = new Set<string>([id]);
@@ -1545,8 +1631,7 @@ export default function App() {
       }
     }
 
-    applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
-    networkRef.current?.redraw();
+    scheduleApplyDim(keepNodes, keepEdges);
     markDirty();
   }
 
@@ -1562,7 +1647,6 @@ export default function App() {
     setLegendActive(new Set([group]));
 
     if (!visNodesRef.current || !visEdgesRef.current) return;
-    const visNodes = visNodesRef.current;
     const visEdges = visEdgesRef.current;
 
     const familyNodes = nodes
@@ -1580,12 +1664,11 @@ export default function App() {
       }
     }
 
-    applyDimStyles(visNodes, visEdges, keepNodes, keepEdges);
+    scheduleApplyDim(keepNodes, keepEdges);
 
     const firstId = familyNodes[0]?.NameID;
     if (firstId) openFamilyAndScrollToNode(firstId);
 
-    networkRef.current?.redraw();
     markDirty();
   }
 
